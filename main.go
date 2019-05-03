@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	attachmentsclient "github.com/SoftwareForScience/jiskefet-api-go/client/attachments"
@@ -111,6 +112,7 @@ func migrateLogbookComments(args Args, logbookDB *sql.DB) {
 	auth := httptransport.BearerToken(args.apiToken)
 
 	// Get Comment data from DB and put into sensible data structures
+	println("Importing logbook_comments")
 	comments := make(map[int64]logbook.Comment) // Map for rows
 	roots := make([]int64, 0)                   // IDs of thread roots
 	parentChildren := make(map[int64][]int64)   // parent -> list of children
@@ -139,6 +141,7 @@ func migrateLogbookComments(args Args, logbookDB *sql.DB) {
 	// fmt.Printf("Thread parent->children:\n%+v\n", parentChildren)
 
 	// Get Files from DB (note: doesn't contain the actual file, it's just metadata)
+	println("Importing logbook_files")
 	files := make(map[int64][]logbook.File) // comment_id -> list of files
 	{
 		rows, err := logbookDB.Query("select * from logbook_files")
@@ -153,56 +156,64 @@ func migrateLogbookComments(args Args, logbookDB *sql.DB) {
 	}
 	// fmt.Printf("Files:\n%+v\n", files)
 
-	for _, id := range roots {
-		// Recursion function to traverse parent -> child relations
-		var Recurse func(id int64, level int)
-		Recurse = func(id int64, level int) {
-			comment := comments[id]
+	var wg sync.WaitGroup
+	wg.Add(len(roots))
 
-			// POST comment log
-			fmt.Printf("Migrating comment\n")
-			fmt.Printf("  - logbook ID = %d\n", id)
-			runs := make([]string, 0)
-			origin := "human"
-			subtype := "comment"
-			params := logsclient.NewPostLogsParams()
-			params.CreateLogDto = new(models.CreateLogDto)
-			params.CreateLogDto.Body = &comment.Comment.String
-			params.CreateLogDto.Origin = &origin
-			params.CreateLogDto.Runs = runs
-			params.CreateLogDto.Subtype = &subtype
-			params.CreateLogDto.Title = &comment.Title.String
-			params.CreateLogDto.User = &comment.UserID.Int64
-			response, err := logsClient.PostLogs(params, auth)
-			check(err)
+	for i, id := range roots {
+		go func(i int, id int64) {
+			defer wg.Done()
+			// Recursion function to traverse parent -> child relations
+			var Recurse func(id int64, level int, parentLogID int64)
+			Recurse = func(id int64, level int, parentLogID int64) {
+				comment := comments[id]
 
-			// Get ID of POSTed log
-			resp := response.Payload.(map[string]interface{})
-			data := resp["data"].(map[string]interface{})
-			item := data["item"].(map[string]interface{})
-			logID, err := item["logId"].(json.Number).Int64()
-			check(err)
-			fmt.Printf("  - jiskefet ID = %d\n", logID)
+				// POST comment log
+				fmt.Printf("Migrating comment %d\n", i+1)
+				fmt.Printf("  - logbook ID = %d\n", id)
+				runs := make([]string, 0)
+				origin := "human"
+				subtype := "comment"
+				params := logsclient.NewPostLogsParams()
+				params.CreateLogDto = new(models.CreateLogDto)
+				params.CreateLogDto.Body = &comment.Comment.String
+				params.CreateLogDto.Origin = &origin
+				params.CreateLogDto.Runs = runs
+				params.CreateLogDto.Subtype = &subtype
+				params.CreateLogDto.Title = &comment.Title.String
+				params.CreateLogDto.User = &comment.UserID.Int64
+				//params.CreateLogDto.ParentLogID = parentLogID
+				response, err := logsClient.PostLogs(params, auth)
+				check(err)
 
-			if _, exists := files[id]; exists {
-				// Post attachments to log
-				fmt.Printf("  Uploading attachments\n")
-				for _, file := range files[id] {
-					fmt.Printf("    - File \"%s\" (%.0f kB)\n", file.FileName.String, float64(file.Size.Int64)/1024.0)
-					uploadAttachment(args, logID, file, attachmentsClient, auth)
+				// Get ID of POSTed log
+				resp := response.Payload.(map[string]interface{})
+				data := resp["data"].(map[string]interface{})
+				item := data["item"].(map[string]interface{})
+				logID, err := item["logId"].(json.Number).Int64()
+				check(err)
+				fmt.Printf("  - jiskefet ID = %d\n", logID)
+				fmt.Printf("  - jiskefet parent ID = %d\n", parentLogID)
+
+				if _, exists := files[id]; exists {
+					// Post attachments to log
+					fmt.Printf("  Uploading attachments\n")
+					for _, file := range files[id] {
+						fmt.Printf("    - File \"%s\" (%.0f kB)\n", file.FileName.String, float64(file.Size.Int64)/1024.0)
+						uploadAttachment(args, logID, file, attachmentsClient, auth)
+					}
+				}
+
+				//fmt.Printf("  %s|_ %d\n", strings.Repeat("  ", level), id)
+				childrenIDs := parentChildren[id]
+				for _, childID := range childrenIDs {
+					Recurse(childID, level+1, logID)
 				}
 			}
-
-			//fmt.Printf("  %s|_ %d\n", strings.Repeat("  ", level), id)
-			childrenIDs := parentChildren[id]
-			for _, childID := range childrenIDs {
-				Recurse(childID, level+1)
-			}
-		}
-
-		// print("  o thread\n")
-		Recurse(id, 0)
+			// print("  o thread\n")
+			Recurse(id, 0, -1)
+		}(i, id)
 	}
+	wg.Wait()
 }
 
 func uploadAttachment(args Args, logID int64, file logbook.File, client *attachmentsclient.Client, auth runtime.ClientAuthInfoWriter) {
@@ -236,6 +247,7 @@ func uploadAttachment(args Args, logID int64, file logbook.File, client *attachm
 	params.CreateAttachmentDto.LogID = &logID
 	params.CreateAttachmentDto.Title = &file.Title.String
 
+	return
 	_, err = client.PostAttachments(params, auth)
 	check(err)
 }
@@ -270,7 +282,6 @@ func migrateLogbookUsers(args Args, logbookDB *sql.DB, jiskefetDB *sql.DB) {
 		check(err)
 		if rowCnt == 0 {
 			log.Printf("ID = %d not inserted, possible duplicate", user.ID.Int64)
-
 		} else {
 			log.Printf("ID = %d, affected = %d\n", lastID, rowCnt)
 		}
@@ -293,18 +304,19 @@ func openDB(args DBArgs) *sql.DB {
 }
 
 func main() {
-	queryLimit := flag.String("limit", "10", "Query result size limit")
-	runBoundLower := flag.String("rmin", "500", "Lower run number bound")
-	runBoundUpper := flag.String("rmax", "9999999", "Upper run number bound")
+	queryLimit := flag.String("rlimit", "10", "Runs: Query result size limit")
+	runBoundLower := flag.String("rmin", "500", "Runs: Lower run number bound")
+	runBoundUpper := flag.String("rmax", "9999999", "Runs: Upper run number bound")
+
 	migrateUsers := flag.Bool("musers", false, "Migrate users")
-	migrateComments := flag.Bool("mcomments", false, "Migrate comments")
+	migrateComments := flag.Bool("mcomments", false, "Migrate comments & attachments")
 	migrateRuns := flag.Bool("mruns", false, "Migrate runs")
 	flag.Parse()
 
 	var args Args
 	args.hostURL = os.Getenv("JISKEFET_HOST")
+	args.apiPath = os.Getenv("JISKEFET_PATH")
 	args.apiToken = os.Getenv("JISKEFET_API_TOKEN")
-	args.apiPath = "api"
 	args.logbookFilesDir = os.Getenv("JISKEFET_MIGRATE_LOGBOOKDB_FILESDIR")
 
 	args.jiskefetDB.dbName = os.Getenv("JISKEFET_MIGRATE_JISKEFETDB_DBNAME")

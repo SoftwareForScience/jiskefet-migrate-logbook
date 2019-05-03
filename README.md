@@ -16,7 +16,7 @@ If your api is at `http://myhost.server.address/api`
 cd $GOPATH/src/github.com/SoftwareForScience/jiskefet-migrate-logbook
 
 export JISKEFET_HOST="myhost.server.address"
-export JISKEFET_API_PATH="api"
+export JISKEFET_PATH="api"
 export JISKEFET_API_TOKEN="sdfsakafuih32784h342..."
 
 export JISKEFET_MIGRATE_JISKEFETDB_DBNAME="jiskefetdb"
