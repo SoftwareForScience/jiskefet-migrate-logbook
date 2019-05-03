@@ -47,6 +47,7 @@ type Args struct {
 	logbookFilesDir string
 	logbookDB       DBArgs
 	jiskefetDB      DBArgs
+	parallel        bool
 }
 
 func migrateLogbookRuns(args Args, logbookDB *sql.DB, runBoundLower string, runBoundUpper string, queryLimit string) {
@@ -55,13 +56,10 @@ func migrateLogbookRuns(args Args, logbookDB *sql.DB, runBoundLower string, runB
 	bearerTokenAuth := httptransport.BearerToken(args.apiToken)
 
 	rows, err := logbookDB.Query("select * from logbook where run>=? and run<=? limit ?", runBoundLower, runBoundUpper, queryLimit)
-	if err != nil {
-		log.Fatal(err)
-	}
+	check(err)
 	defer rows.Close()
 	for rows.Next() {
-		var row logbook.Run
-		logbook.ScanRun(rows, &row)
+		row := logbook.ScanRun(rows)
 
 		//log.Println("run = " + row.run)
 		//fmt.Printf("%+v\n", row)
@@ -122,8 +120,7 @@ func migrateLogbookComments(args Args, logbookDB *sql.DB) {
 		defer rows.Close()
 
 		for rows.Next() {
-			var row logbook.Comment
-			logbook.ScanComment(rows, &row)
+			row := logbook.ScanComment(rows)
 
 			id := row.ID.Int64
 			comments[id] = row
@@ -159,8 +156,9 @@ func migrateLogbookComments(args Args, logbookDB *sql.DB) {
 	var wg sync.WaitGroup
 	wg.Add(len(roots))
 
+	println("Posting comments")
 	for i, id := range roots {
-		go func(i int, id int64) {
+		f := func(i int, id int64) {
 			defer wg.Done()
 			// Recursion function to traverse parent -> child relations
 			var Recurse func(id int64, level int, parentLogID int64)
@@ -168,8 +166,8 @@ func migrateLogbookComments(args Args, logbookDB *sql.DB) {
 				comment := comments[id]
 
 				// POST comment log
-				fmt.Printf("Migrating comment %d\n", i+1)
-				fmt.Printf("  - logbook ID = %d\n", id)
+				fmt.Printf("  - Comment #%d\n", i+1)
+				fmt.Printf("    logbook ID = %d\n", id)
 				runs := make([]string, 0)
 				origin := "human"
 				subtype := "comment"
@@ -191,14 +189,14 @@ func migrateLogbookComments(args Args, logbookDB *sql.DB) {
 				item := data["item"].(map[string]interface{})
 				logID, err := item["logId"].(json.Number).Int64()
 				check(err)
-				fmt.Printf("  - jiskefet ID = %d\n", logID)
-				fmt.Printf("  - jiskefet parent ID = %d\n", parentLogID)
+				fmt.Printf("    jiskefet ID = %d\n", logID)
+				fmt.Printf("    jiskefet parent ID = %d\n", parentLogID)
 
 				if _, exists := files[id]; exists {
 					// Post attachments to log
-					fmt.Printf("  Uploading attachments\n")
+					fmt.Printf("    Uploading %d attachments\n", len(files[id]))
 					for _, file := range files[id] {
-						fmt.Printf("    - File \"%s\" (%.0f kB)\n", file.FileName.String, float64(file.Size.Int64)/1024.0)
+						fmt.Printf("      - File \"%s\" (%.0f kB)\n", file.FileName.String, float64(file.Size.Int64)/1024.0)
 						uploadAttachment(args, logID, file, attachmentsClient, auth)
 					}
 				}
@@ -211,13 +209,17 @@ func migrateLogbookComments(args Args, logbookDB *sql.DB) {
 			}
 			// print("  o thread\n")
 			Recurse(id, 0, -1)
-		}(i, id)
+		}
+		if args.parallel {
+			go f(i, id)
+		} else {
+			f(i, id)
+		}
 	}
 	wg.Wait()
 }
 
 func uploadAttachment(args Args, logID int64, file logbook.File, client *attachmentsclient.Client, auth runtime.ClientAuthInfoWriter) {
-
 	timeCreated := file.TimeCreated.String
 	timeSplit := strings.Split(timeCreated, "-")
 	year := timeSplit[0]
@@ -229,7 +231,7 @@ func uploadAttachment(args Args, logID int64, file logbook.File, client *attachm
 	path := fmt.Sprintf("%s/%s-%s/%d_%d.%s",
 		args.logbookFilesDir, year, month, file.CommentID.Int64, file.FileID.Int64, extension)
 
-	fmt.Printf("      Reading from \"%s\" ... ", path)
+	fmt.Printf("        Reading from \"%s\" ... ", path)
 	fileBytes, err := ioutil.ReadFile(path)
 	check(err)
 	fmt.Printf("%d bytes\n", len(fileBytes))
@@ -247,9 +249,47 @@ func uploadAttachment(args Args, logID int64, file logbook.File, client *attachm
 	params.CreateAttachmentDto.LogID = &logID
 	params.CreateAttachmentDto.Title = &file.Title.String
 
+	println("        NOTE: PostAttachment disabled due to server bug")
 	return
 	_, err = client.PostAttachments(params, auth)
 	check(err)
+}
+
+func migrateLogbookSubsystems(args Args, logbookDB *sql.DB, jiskefetDB *sql.DB) {
+	// Unfortunately, we can't use the API for this, and need direct DB
+	// access.
+
+	// Get Subsystems
+	logbookSubsystems := make([]logbook.Subsystem, 0)
+	{
+		rows, err := logbookDB.Query("select * from logbook_subsystems")
+		check(err)
+		defer rows.Close()
+
+		for rows.Next() {
+			logbookSubsystems = append(logbookSubsystems, logbook.ScanSubsystem(rows))
+		}
+		check(rows.Err())
+	}
+	// fmt.Printf("Logbook subsystems:\n%+v\n", logbookSubsystems)
+
+	// Insert them into Jiskefet
+	for _, subsystem := range logbookSubsystems {
+		fmt.Printf("  - Inserting \"%s\"\n", subsystem.Name.String)
+		stmt, err := jiskefetDB.Prepare("INSERT IGNORE INTO sub_system(subsystem_id, subsystem_name) VALUES(?,?)")
+		check(err)
+		res, err := stmt.Exec(subsystem.ID.Int64, subsystem.Name.String)
+		check(err)
+		lastID, err := res.LastInsertId()
+		check(err)
+		rowCnt, err := res.RowsAffected()
+		check(err)
+		if rowCnt == 0 {
+			println("    Not inserted, possible duplicate")
+		} else {
+			fmt.Printf("    Inserted ID = %d, affected = %d\n", lastID, rowCnt)
+		}
+	}
 }
 
 func migrateLogbookUsers(args Args, logbookDB *sql.DB, jiskefetDB *sql.DB) {
@@ -272,18 +312,19 @@ func migrateLogbookUsers(args Args, logbookDB *sql.DB, jiskefetDB *sql.DB) {
 
 	// Insert them into Jiskefet
 	for _, user := range logbookUsers {
+		fmt.Printf("  - Inserting \"%d\"\n", user.ID.Int64)
 		stmt, err := jiskefetDB.Prepare("INSERT IGNORE INTO user(user_id, external_id, sams_id) VALUES(?,?,?)")
 		check(err)
-		res, err := stmt.Exec(user.ID, user.ID, user.ID)
+		res, err := stmt.Exec(user.ID.Int64, user.ID.Int64, user.ID.Int64)
 		check(err)
 		lastID, err := res.LastInsertId()
 		check(err)
 		rowCnt, err := res.RowsAffected()
 		check(err)
 		if rowCnt == 0 {
-			log.Printf("ID = %d not inserted, possible duplicate", user.ID.Int64)
+			println("    Not inserted, possible duplicate")
 		} else {
-			log.Printf("ID = %d, affected = %d\n", lastID, rowCnt)
+			fmt.Printf("    ID = %d, affected = %d\n", lastID, rowCnt)
 		}
 	}
 }
@@ -307,13 +348,16 @@ func main() {
 	queryLimit := flag.String("rlimit", "10", "Runs: Query result size limit")
 	runBoundLower := flag.String("rmin", "500", "Runs: Lower run number bound")
 	runBoundUpper := flag.String("rmax", "9999999", "Runs: Upper run number bound")
+	parallel := flag.Bool("parallel", false, "Use parallel requests")
 
+	migrateSubsystems := flag.Bool("msubsystems", false, "Migrate subsystems")
 	migrateUsers := flag.Bool("musers", false, "Migrate users")
 	migrateComments := flag.Bool("mcomments", false, "Migrate comments & attachments")
 	migrateRuns := flag.Bool("mruns", false, "Migrate runs")
 	flag.Parse()
 
 	var args Args
+	args.parallel = *parallel
 	args.hostURL = os.Getenv("JISKEFET_HOST")
 	args.apiPath = os.Getenv("JISKEFET_PATH")
 	args.apiToken = os.Getenv("JISKEFET_API_TOKEN")
@@ -335,6 +379,11 @@ func main() {
 	print("Opening Jiskefet database\n")
 	jiskefetDB := openDB(args.jiskefetDB)
 	defer jiskefetDB.Close()
+
+	if *migrateSubsystems {
+		println("Migrating subsystems...")
+		migrateLogbookSubsystems(args, logbookDB, jiskefetDB)
+	}
 
 	if *migrateUsers {
 		println("Migrating users...")

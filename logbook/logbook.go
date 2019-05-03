@@ -116,11 +116,6 @@ type File struct {
 	Deleted     sql.NullInt64
 }
 
-type Subsystem struct {
-	ID   sql.NullInt64
-	Name sql.NullString
-}
-
 type User struct {
 	ID        sql.NullInt64  // int(11)
 	Username  sql.NullString // char(32)
@@ -129,4 +124,19 @@ type User struct {
 	Email     sql.NullString // char(128)
 	GroupName sql.NullString // char(16)
 	LastLogin sql.NullString // timestamp
+}
+
+type Subsystem struct {
+	ID                       sql.NullInt64  // int(11)
+	Name                     sql.NullString // char(32)
+	Text                     sql.NullString // char(64)
+	Parent                   sql.NullInt64  // int(11)
+	Email                    sql.NullString // char(64)
+	EmailProcess             sql.NullString // char(64)
+	NotifyNoRunLogEntries    sql.NullInt64  // tinyint(1)
+	NotifyRunLogEntries      sql.NullInt64  // tinyint(1)
+	NotifyQualityFlags       sql.NullInt64  // tinyint(1)
+	NotifyGlobalQualityFlags sql.NullInt64  // tinyint(1)
+	NotifyProcessLogEntries  sql.NullString // text
+	Obsolete                 sql.NullInt64  // tinyint(1)
 }

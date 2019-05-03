@@ -13,7 +13,8 @@ func check(err error) {
 }
 
 // ScanRun ...
-func ScanRun(rows *sql.Rows, row *Run) {
+func ScanRun(rows *sql.Rows) Run {
+	var row Run
 	err := rows.Scan(
 		&row.Run,
 		&row.Time_created,
@@ -98,10 +99,12 @@ func ScanRun(rows *sql.Rows, row *Run) {
 		&row.NumberOfPar,
 		&row.NumberOfFailedPar)
 	check(err)
+	return row
 }
 
 /// ScanComment ...
-func ScanComment(rows *sql.Rows, row *Comment) {
+func ScanComment(rows *sql.Rows) Comment {
+	var row Comment
 	err := rows.Scan(
 		&row.ID,
 		&row.Run,
@@ -119,6 +122,7 @@ func ScanComment(rows *sql.Rows, row *Comment) {
 		&row.ProcessedEmailNotification,
 		&row.Context)
 	check(err)
+	return row
 }
 
 /// ScanUser ...
@@ -148,6 +152,26 @@ func ScanFile(rows *sql.Rows) File {
 		&row.ContentType,
 		&row.TimeCreated,
 		&row.Deleted)
+	check(err)
+	return row
+}
+
+/// ScanSubsystem ...
+func ScanSubsystem(rows *sql.Rows) Subsystem {
+	var row Subsystem
+	err := rows.Scan(
+		&row.ID,
+		&row.Name,
+		&row.Text,
+		&row.Parent,
+		&row.Email,
+		&row.EmailProcess,
+		&row.NotifyNoRunLogEntries,
+		&row.NotifyRunLogEntries,
+		&row.NotifyQualityFlags,
+		&row.NotifyGlobalQualityFlags,
+		&row.NotifyProcessLogEntries,
+		&row.Obsolete)
 	check(err)
 	return row
 }

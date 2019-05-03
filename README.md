@@ -1,6 +1,6 @@
 # Jiskefet Migrate Logbook
 This is a tool for reading data from the old logbook database format and sending it via the Jiskefet Go API.
-It also needs direct access to the Jiskefet DB for migrating users.
+It also needs direct access to the Jiskefet DB for migrating users and subsystems.
 Note that the migration of runs, comments, and attachments are not idempotent: migrate multiple times and you'll have duplicates.
 
 ## Setup
