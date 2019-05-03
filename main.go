@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -12,280 +13,54 @@ import (
 	"time"
 
 	attachmentsclient "github.com/SoftwareForScience/jiskefet-api-go/client/attachments"
+	logsclient "github.com/SoftwareForScience/jiskefet-api-go/client/logs"
 	"github.com/SoftwareForScience/jiskefet-api-go/client/runs"
 	runsclient "github.com/SoftwareForScience/jiskefet-api-go/client/runs"
 	"github.com/SoftwareForScience/jiskefet-api-go/models"
+	"github.com/SoftwareForScience/jiskefet-migrate-logbook/logbook"
+	"github.com/go-openapi/runtime"
 	httptransport "github.com/go-openapi/runtime/client"
 	"github.com/go-openapi/strfmt"
 	_ "github.com/go-sql-driver/mysql"
 )
 
-func check(e error) {
-	if e != nil {
-		panic(e)
-	}
-}
-
-type LogbookCommentsRow struct {
-	id                         sql.NullInt64
-	run                        sql.NullInt64
-	userid                     sql.NullInt64
-	title                      sql.NullString
-	comment                    sql.NullString
-	class                      sql.NullString // enum('HUMAN','PROCESS')
-	commentType                sql.NullString // enum('GENERAL','HARDWARE','CAVERN','DQM/QA','SOFTWARE','NETWORK','EOS','DCS','OTHER')
-	timeCreated                sql.NullString // timestamp
-	deleted                    sql.NullInt64
-	parent                     sql.NullInt64
-	rootParent                 sql.NullInt64
-	dashboard                  sql.NullInt64
-	timeValidity               sql.NullString // timestamp
-	processedEmailNotification sql.NullInt64
-	context                    sql.NullString // enum('DEFAULT','QUALITYFLAG','GLOBALQUALITYFLAG','EORREASON')
-}
-
-func scanLogbookCommentsRow(rows *sql.Rows, row *LogbookCommentsRow) {
-	err := rows.Scan(
-		&row.id,
-		&row.run,
-		&row.userid,
-		&row.title,
-		&row.comment,
-		&row.class,
-		&row.commentType,
-		&row.timeCreated,
-		&row.deleted,
-		&row.parent,
-		&row.rootParent,
-		&row.dashboard,
-		&row.timeValidity,
-		&row.processedEmailNotification,
-		&row.context)
+func check(err error) {
 	if err != nil {
-		log.Println(err)
-		panic("scan failure")
+		panic(err)
 	}
 }
 
-type LogbookFilesRow struct {
-	commentid   sql.NullInt64
-	filename    sql.NullString
-	title       sql.NullString
-	timeCreated sql.NullString // timestamp
-}
-
-type LogbookSubsystemsRow struct {
-	id   sql.NullInt64
-	name sql.NullString
-}
-
-type LogbookUsersRow struct {
-	id         sql.NullInt64
-	username   sql.NullString
-	first_name sql.NullString
-	full_name  sql.NullString
-	email      sql.NullString
-	group_name sql.NullString
-	last_login sql.NullString // timestamp
-}
-
-type LogbookRow struct {
-	run                                    sql.NullString
-	time_created                           sql.NullFloat64
-	DAQ_time_start                         sql.NullFloat64
-	DAQ_time_end                           sql.NullFloat64
-	TRGTimeStart                           sql.NullFloat64
-	TRGTimeEnd                             sql.NullFloat64
-	time_update                            sql.NullString
-	runDuration                            sql.NullInt64
-	pauseDuration                          sql.NullInt64
-	partition                              sql.NullString
-	detector                               sql.NullString
-	run_type                               sql.NullString
-	calibration                            sql.NullInt64
-	beamEnergy                             sql.NullString
-	beamType                               sql.NullString
-	LHCBeamMode                            sql.NullString
-	LHCFillNumber                          sql.NullString
-	LHCTotalInteractingBunches             sql.NullString
-	LHCTotalNonInteractingBunchesBeam1     sql.NullString
-	LHCTotalNonInteractingBunchesBeam2     sql.NullString
-	LHCBetaStar                            sql.NullString
-	LHCFillingSchemeName                   sql.NullString
-	LHCInstIntensityNonInteractingBeam1SOR sql.NullString
-	LHCInstIntensityNonInteractingBeam1EOR sql.NullString
-	LHCInstIntensityNonInteractingBeam1Avg sql.NullString
-	LHCInstIntensityInteractingBeam1SOR    sql.NullString
-	LHCInstIntensityInteractingBeam1EOR    sql.NullString
-	LHCInstIntensityInteractingBeam1Avg    sql.NullString
-	LHCInstIntensityNonInteractingBeam2SOR sql.NullString
-	LHCInstIntensityNonInteractingBeam2EOR sql.NullString
-	LHCInstIntensityNonInteractingBeam2Avg sql.NullString
-	LHCInstIntensityInteractingBeam2SOR    sql.NullString
-	LHCInstIntensityInteractingBeam2EOR    sql.NullString
-	LHCInstIntensityInteractingBeam2Avg    sql.NullString
-	LHCInfoStatus                          sql.NullString
-	forceLHCReco                           sql.NullString
-	numberOfDetectors                      sql.NullInt64
-	detectorMask                           sql.NullString
-	splitterDetectorMask                   sql.NullString
-	log                                    sql.NullString
-	totalSubEvents                         sql.NullInt64
-	totalDataReadout                       sql.NullInt64
-	totalEvents                            sql.NullInt64
-	totalEventsPhysics                     sql.NullInt64
-	totalEventsCalibration                 sql.NullInt64
-	totalEventsIncomplete                  sql.NullInt64
-	totalDataEventBuilder                  sql.NullInt64
-	totalDataRecorded                      sql.NullInt64
-	averageDataRateReadout                 sql.NullString
-	averageDataRateEventBuilder            sql.NullString
-	averageDataRateRecorded                sql.NullString
-	averageSubEventsPerSecond              sql.NullString
-	averageEventsPerSecond                 sql.NullString
-	numberOfLDCs                           sql.NullInt64
-	numberOfGDCs                           sql.NullInt64
-	numberOfStreams                        sql.NullInt64
-	LHCperiod                              sql.NullString
-	HLTmode                                sql.NullString
-	LDClocalRecording                      sql.NullString
-	GDClocalRecording                      sql.NullString
-	GDCmStreamRecording                    sql.NullString
-	eventBuilding                          sql.NullString
-	time_completed                         sql.NullString
-	ecs_success                            sql.NullString
-	daq_success                            sql.NullString
-	eor_reason                             sql.NullString
-	dataMigrated                           sql.NullString
-	runQuality                             sql.NullString
-	L3_magnetCurrent                       sql.NullString
-	Dipole_magnetCurrent                   sql.NullString
-	L2a                                    sql.NullString
-	ctpDuration                            sql.NullString
-	ecs_iteration_current                  sql.NullString
-	ecs_iteration_total                    sql.NullString
-	totalNumberOfFilesWriting              sql.NullInt64
-	totalNumberOfFilesClosed               sql.NullInt64
-	totalNumberOfFilesWaitingMigration     sql.NullInt64
-	totalNumberOfFilesMigrationRequested   sql.NullInt64
-	totalNumberOfFilesMigrating            sql.NullInt64
-	totalNumberOfFilesMigrated             sql.NullInt64
-	numberOfPar                            sql.NullInt64
-	numberOfFailedPar                      sql.NullInt64
-}
-
-func scanLogbookRow(rows *sql.Rows, row *LogbookRow) {
-	err := rows.Scan(
-		&row.run,
-		&row.time_created,
-		&row.DAQ_time_start,
-		&row.DAQ_time_end,
-		&row.TRGTimeStart,
-		&row.TRGTimeEnd,
-		&row.time_update,
-		&row.runDuration,
-		&row.pauseDuration,
-		&row.partition,
-		&row.detector,
-		&row.run_type,
-		&row.calibration,
-		&row.beamEnergy,
-		&row.beamType,
-		&row.LHCBeamMode,
-		&row.LHCFillNumber,
-		&row.LHCTotalInteractingBunches,
-		&row.LHCTotalNonInteractingBunchesBeam1,
-		&row.LHCTotalNonInteractingBunchesBeam2,
-		&row.LHCBetaStar,
-		&row.LHCFillingSchemeName,
-		&row.LHCInstIntensityNonInteractingBeam1SOR,
-		&row.LHCInstIntensityNonInteractingBeam1EOR,
-		&row.LHCInstIntensityNonInteractingBeam1Avg,
-		&row.LHCInstIntensityInteractingBeam1SOR,
-		&row.LHCInstIntensityInteractingBeam1EOR,
-		&row.LHCInstIntensityInteractingBeam1Avg,
-		&row.LHCInstIntensityNonInteractingBeam2SOR,
-		&row.LHCInstIntensityNonInteractingBeam2EOR,
-		&row.LHCInstIntensityNonInteractingBeam2Avg,
-		&row.LHCInstIntensityInteractingBeam2SOR,
-		&row.LHCInstIntensityInteractingBeam2EOR,
-		&row.LHCInstIntensityInteractingBeam2Avg,
-		&row.LHCInfoStatus,
-		&row.forceLHCReco,
-		&row.numberOfDetectors,
-		&row.detectorMask,
-		&row.splitterDetectorMask,
-		&row.log,
-		&row.totalSubEvents,
-		&row.totalDataReadout,
-		&row.totalEvents,
-		&row.totalEventsPhysics,
-		&row.totalEventsCalibration,
-		&row.totalEventsIncomplete,
-		&row.totalDataEventBuilder,
-		&row.totalDataRecorded,
-		&row.averageDataRateReadout,
-		&row.averageDataRateEventBuilder,
-		&row.averageDataRateRecorded,
-		&row.averageSubEventsPerSecond,
-		&row.averageEventsPerSecond,
-		&row.numberOfLDCs,
-		&row.numberOfGDCs,
-		&row.numberOfStreams,
-		&row.LHCperiod,
-		&row.HLTmode,
-		&row.LDClocalRecording,
-		&row.GDClocalRecording,
-		&row.GDCmStreamRecording,
-		&row.eventBuilding,
-		&row.time_completed,
-		&row.ecs_success,
-		&row.daq_success,
-		&row.eor_reason,
-		&row.dataMigrated,
-		&row.runQuality,
-		&row.L3_magnetCurrent,
-		&row.Dipole_magnetCurrent,
-		&row.L2a,
-		&row.ctpDuration,
-		&row.ecs_iteration_current,
-		&row.ecs_iteration_total,
-		&row.totalNumberOfFilesWriting,
-		&row.totalNumberOfFilesClosed,
-		&row.totalNumberOfFilesWaitingMigration,
-		&row.totalNumberOfFilesMigrationRequested,
-		&row.totalNumberOfFilesMigrating,
-		&row.totalNumberOfFilesMigrated,
-		&row.numberOfPar,
-		&row.numberOfFailedPar)
-	if err != nil {
-		log.Println(err)
-		panic("scan failure")
-	}
+type DBArgs struct {
+	dbName   string
+	hostPort string
+	userName string
+	password string
 }
 
 type Args struct {
-	hostURL      string
-	apiPath      string
-	apiToken     string
-	username     string
-	password     string
-	databaseName string
+	hostURL         string
+	apiPath         string
+	apiToken        string
+	username        string
+	password        string
+	logbookFilesDir string
+	logbookDB       DBArgs
+	jiskefetDB      DBArgs
 }
 
-func migrateLogbookRuns(args Args, db *sql.DB, runBoundLower string, runBoundUpper string, queryLimit string) {
+func migrateLogbookRuns(args Args, logbookDB *sql.DB, runBoundLower string, runBoundUpper string, queryLimit string) {
 	// Initialize Jiskefet API
 	client := runsclient.New(httptransport.New(args.hostURL, args.apiPath, nil), strfmt.Default)
 	bearerTokenAuth := httptransport.BearerToken(args.apiToken)
 
-	rows, err := db.Query("select * from logbook where run>=? and run<=? limit ?", runBoundLower, runBoundUpper, queryLimit)
+	rows, err := logbookDB.Query("select * from logbook where run>=? and run<=? limit ?", runBoundLower, runBoundUpper, queryLimit)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var row LogbookRow
-		scanLogbookRow(rows, &row)
+		var row logbook.Run
+		logbook.ScanRun(rows, &row)
 
 		//log.Println("run = " + row.run)
 		//fmt.Printf("%+v\n", row)
@@ -314,9 +89,9 @@ func migrateLogbookRuns(args Args, db *sql.DB, runBoundLower string, runBoundUpp
 		params.CreateRunDto.TrgStartTime = &start
 		params.CreateRunDto.RunType = &runType
 		// params.CreateRunDto.ActivityID = &activityId
-		params.CreateRunDto.NDetectors = &row.numberOfDetectors.Int64
-		params.CreateRunDto.NFlps = &row.numberOfLDCs.Int64
-		params.CreateRunDto.NEpns = &row.numberOfGDCs.Int64
+		params.CreateRunDto.NDetectors = &row.NumberOfDetectors.Int64
+		params.CreateRunDto.NFlps = &row.NumberOfLDCs.Int64
+		params.CreateRunDto.NEpns = &row.NumberOfGDCs.Int64
 
 		_, err = client.PostRuns(params, bearerTokenAuth)
 		if err != nil {
@@ -329,130 +104,238 @@ func migrateLogbookRuns(args Args, db *sql.DB, runBoundLower string, runBoundUpp
 	}
 }
 
-func migrateLogbookComments(args Args, db *sql.DB) {
+func migrateLogbookComments(args Args, logbookDB *sql.DB) {
 	// Initialize Jiskefet API
-	// client := logsclient.New(httptransport.New(args.hostURL, args.apiPath, nil), strfmt.Default)
-	// bearerTokenAuth := httptransport.BearerToken(args.apiToken)
+	logsClient := logsclient.New(httptransport.New(args.hostURL, args.apiPath, nil), strfmt.Default)
+	attachmentsClient := attachmentsclient.New(httptransport.New(args.hostURL, args.apiPath, nil), strfmt.Default)
+	auth := httptransport.BearerToken(args.apiToken)
 
-	rows, err := db.Query("select * from logbook_comments")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer rows.Close()
+	// Get Comment data from DB and put into sensible data structures
+	comments := make(map[int64]logbook.Comment) // Map for rows
+	roots := make([]int64, 0)                   // IDs of thread roots
+	parentChildren := make(map[int64][]int64)   // parent -> list of children
+	{
+		rows, err := logbookDB.Query("select * from logbook_comments")
+		check(err)
+		defer rows.Close()
 
-	comments := make(map[int64]LogbookCommentsRow) // Map for rows
-	roots := make([]int64, 0)                      // IDs of thread roots
-	parentChildren := make(map[int64][]int64)      // parent -> list of children
+		for rows.Next() {
+			var row logbook.Comment
+			logbook.ScanComment(rows, &row)
 
-	for rows.Next() {
-		var row LogbookCommentsRow
-		scanLogbookCommentsRow(rows, &row)
-		// fmt.Printf("%+v\n", row)
-
-		id := row.id.Int64
-		comments[id] = row
-		if !row.parent.Valid && !row.rootParent.Valid {
-			// We have a thread root
-			roots = append(roots, id)
+			id := row.ID.Int64
+			comments[id] = row
+			if !row.Parent.Valid && !row.RootParent.Valid {
+				// We have a thread root
+				roots = append(roots, id)
+			}
+			if row.Parent.Valid {
+				parentChildren[row.Parent.Int64] = append(parentChildren[row.Parent.Int64], id)
+			}
 		}
-		if row.parent.Valid {
-			parentChildren[row.parent.Int64] = append(parentChildren[row.parent.Int64], id)
-		}
+		check(rows.Err())
 	}
-	err = rows.Err()
-	if err != nil {
-		log.Fatal(err)
-	}
+	// fmt.Printf("Thread roots:\n%+v\n", roots)
+	// fmt.Printf("Thread parent->children:\n%+v\n", parentChildren)
 
-	fmt.Printf("Thread roots:\n%+v\n", roots)
-	fmt.Printf("Thread parent->children:\n%+v\n", parentChildren)
+	// Get Files from DB (note: doesn't contain the actual file, it's just metadata)
+	files := make(map[int64][]logbook.File) // comment_id -> list of files
+	{
+		rows, err := logbookDB.Query("select * from logbook_files")
+		check(err)
+		defer rows.Close()
+
+		for rows.Next() {
+			file := logbook.ScanFile(rows)
+			files[file.CommentID.Int64] = append(files[file.CommentID.Int64], file)
+		}
+		check(rows.Err())
+	}
+	// fmt.Printf("Files:\n%+v\n", files)
 
 	for _, id := range roots {
-
 		// Recursion function to traverse parent -> child relations
 		var Recurse func(id int64, level int)
 		Recurse = func(id int64, level int) {
-			// POST comment
-			// logs.NewPostCommentParams()...
-			// _, err = client.PostLogs(params, bearerTokenAuth)
-			// if err != nil {
-			// 	fmt.Println(err)
-			// }
+			comment := comments[id]
 
-			fmt.Printf("  %s|_ %d\n", strings.Repeat("  ", level), id)
+			// POST comment log
+			fmt.Printf("Migrating comment\n")
+			fmt.Printf("  - logbook ID = %d\n", id)
+			runs := make([]string, 0)
+			origin := "human"
+			subtype := "comment"
+			params := logsclient.NewPostLogsParams()
+			params.CreateLogDto = new(models.CreateLogDto)
+			params.CreateLogDto.Body = &comment.Comment.String
+			params.CreateLogDto.Origin = &origin
+			params.CreateLogDto.Runs = runs
+			params.CreateLogDto.Subtype = &subtype
+			params.CreateLogDto.Title = &comment.Title.String
+			params.CreateLogDto.User = &comment.UserID.Int64
+			response, err := logsClient.PostLogs(params, auth)
+			check(err)
+
+			// Get ID of POSTed log
+			resp := response.Payload.(map[string]interface{})
+			data := resp["data"].(map[string]interface{})
+			item := data["item"].(map[string]interface{})
+			logID, err := item["logId"].(json.Number).Int64()
+			check(err)
+			fmt.Printf("  - jiskefet ID = %d\n", logID)
+
+			if _, exists := files[id]; exists {
+				// Post attachments to log
+				fmt.Printf("  Uploading attachments\n")
+				for _, file := range files[id] {
+					fmt.Printf("    - File \"%s\" (%.0f kB)\n", file.FileName.String, float64(file.Size.Int64)/1024.0)
+					uploadAttachment(args, logID, file, attachmentsClient, auth)
+				}
+			}
+
+			//fmt.Printf("  %s|_ %d\n", strings.Repeat("  ", level), id)
 			childrenIDs := parentChildren[id]
 			for _, childID := range childrenIDs {
 				Recurse(childID, level+1)
 			}
 		}
 
-		print("  o thread\n")
+		// print("  o thread\n")
 		Recurse(id, 0)
 	}
 }
 
-func uploadAttachment(args Args) {
-	client := attachmentsclient.New(httptransport.New(args.hostURL, args.apiPath, nil), strfmt.Default)
-	auth := httptransport.BearerToken(args.apiToken)
+func uploadAttachment(args Args, logID int64, file logbook.File, client *attachmentsclient.Client, auth runtime.ClientAuthInfoWriter) {
 
-	fileBytes, err := ioutil.ReadFile("/tmp/test-photo.jpg")
+	timeCreated := file.TimeCreated.String
+	timeSplit := strings.Split(timeCreated, "-")
+	year := timeSplit[0]
+	month := timeSplit[1]
+
+	fileNameSplit := strings.Split(file.FileName.String, ".")
+	extension := fileNameSplit[len(fileNameSplit)-1]
+
+	path := fmt.Sprintf("%s/%s-%s/%d_%d.%s",
+		args.logbookFilesDir, year, month, file.CommentID.Int64, file.FileID.Int64, extension)
+
+	fmt.Printf("      Reading from \"%s\" ... ", path)
+	fileBytes, err := ioutil.ReadFile(path)
 	check(err)
+	fmt.Printf("%d bytes\n", len(fileBytes))
 
-	fmt.Printf("Read photo, %d bytes\n", len(fileBytes))
-
-	mime := "image/jpeg"
-	contentType := "content-type: " + mime
+	mime := file.ContentType.String
 	fileEncoded := base64.StdEncoding.EncodeToString([]byte(fileBytes))
-	fileName := "test-photo.jpg"
-	fileSize := int64(len(fileBytes))
-	logID := int64(1)
-	title := "Test photo"
 
 	params := attachmentsclient.NewPostAttachmentsParams()
 	params.CreateAttachmentDto = new(models.CreateAttachmentDto)
-	params.CreateAttachmentDto.ContentType = &contentType
+	params.CreateAttachmentDto.ContentType = &mime
 	params.CreateAttachmentDto.FileData = &fileEncoded
 	params.CreateAttachmentDto.FileMime = &mime
-	params.CreateAttachmentDto.FileName = &fileName
-	params.CreateAttachmentDto.FileSize = &fileSize
+	params.CreateAttachmentDto.FileName = &file.FileName.String
+	params.CreateAttachmentDto.FileSize = &file.Size.Int64
 	params.CreateAttachmentDto.LogID = &logID
-	params.CreateAttachmentDto.Title = &title
+	params.CreateAttachmentDto.Title = &file.Title.String
 
 	_, err = client.PostAttachments(params, auth)
 	check(err)
 }
 
-func main() {
-	apiPath := flag.String("apipath", "api", "Path to API")
-	databaseName := flag.String("db", "LOGBOOK", "Name of database")
-	queryLimit := flag.String("limit", "10", "Query result size limit")
-	runBoundLower := flag.String("rmin", "500", "Lower run number bound")
-	runBoundUpper := flag.String("rmax", "9999999", "Upper run number bound")
-	flag.Parse()
-	var args Args
-	args.hostURL = os.Getenv("JISKEFET_HOST")
-	args.apiToken = os.Getenv("JISKEFET_API_TOKEN")
-	args.username = os.Getenv("JISKEFET_MIGRATE_USER")
-	args.password = os.Getenv("JISKEFET_MIGRATE_PASSWORD")
-	args.apiPath = *apiPath
-	args.databaseName = *databaseName
+func migrateLogbookUsers(args Args, logbookDB *sql.DB, jiskefetDB *sql.DB) {
+	// Unfortunately, we can't use the API for this, and need direct DB
+	// access.
 
-	print("Opening database\n")
-	db, err := sql.Open("mysql", args.username+":"+args.password+"@tcp(127.0.0.1:3306)/"+args.databaseName)
+	// Get Logbook users
+	logbookUsers := make([]logbook.User, 0)
+	{
+		rows, err := logbookDB.Query("select * from logbook_users")
+		check(err)
+		defer rows.Close()
+
+		for rows.Next() {
+			logbookUsers = append(logbookUsers, logbook.ScanUser(rows))
+		}
+		check(rows.Err())
+	}
+	//fmt.Printf("Logbook users:\n%+v\n", logbookUsers)
+
+	// Insert them into Jiskefet
+	for _, user := range logbookUsers {
+		stmt, err := jiskefetDB.Prepare("INSERT IGNORE INTO user(user_id, external_id, sams_id) VALUES(?,?,?)")
+		check(err)
+		res, err := stmt.Exec(user.ID, user.ID, user.ID)
+		check(err)
+		lastID, err := res.LastInsertId()
+		check(err)
+		rowCnt, err := res.RowsAffected()
+		check(err)
+		if rowCnt == 0 {
+			log.Printf("ID = %d not inserted, possible duplicate", user.ID.Int64)
+
+		} else {
+			log.Printf("ID = %d, affected = %d\n", lastID, rowCnt)
+		}
+	}
+}
+
+func openDB(args DBArgs) *sql.DB {
+	db, err := sql.Open("mysql", args.userName+":"+args.password+"@tcp("+args.hostPort+")/"+args.dbName)
 	if err != nil {
+		db.Close()
 		panic(err.Error())
 	}
-	defer db.Close()
 	// Check if connection is OK
 	err = db.Ping()
 	if err != nil {
+		db.Close()
 		panic(err.Error())
 	}
+	return db
+}
 
-	uploadAttachment(args)
-	return
-	print("Migrating logbook_comments\n")
-	migrateLogbookComments(args, db)
-	return
-	migrateLogbookRuns(args, db, *runBoundLower, *runBoundUpper, *queryLimit)
+func main() {
+	queryLimit := flag.String("limit", "10", "Query result size limit")
+	runBoundLower := flag.String("rmin", "500", "Lower run number bound")
+	runBoundUpper := flag.String("rmax", "9999999", "Upper run number bound")
+	migrateUsers := flag.Bool("musers", false, "Migrate users")
+	migrateComments := flag.Bool("mcomments", false, "Migrate comments")
+	migrateRuns := flag.Bool("mruns", false, "Migrate runs")
+	flag.Parse()
+
+	var args Args
+	args.hostURL = os.Getenv("JISKEFET_HOST")
+	args.apiToken = os.Getenv("JISKEFET_API_TOKEN")
+	args.apiPath = "api"
+	args.logbookFilesDir = os.Getenv("JISKEFET_MIGRATE_LOGBOOKDB_FILESDIR")
+
+	args.jiskefetDB.dbName = os.Getenv("JISKEFET_MIGRATE_JISKEFETDB_DBNAME")
+	args.jiskefetDB.hostPort = os.Getenv("JISKEFET_MIGRATE_JISKEFETDB_HOSTPORT")
+	args.jiskefetDB.userName = os.Getenv("JISKEFET_MIGRATE_JISKEFETDB_USERNAME")
+	args.jiskefetDB.password = os.Getenv("JISKEFET_MIGRATE_JISKEFETDB_PASSWORD")
+
+	args.logbookDB.dbName = os.Getenv("JISKEFET_MIGRATE_LOGBOOKDB_DBNAME")
+	args.logbookDB.hostPort = os.Getenv("JISKEFET_MIGRATE_LOGBOOKDB_HOSTPORT")
+	args.logbookDB.userName = os.Getenv("JISKEFET_MIGRATE_LOGBOOKDB_USERNAME")
+	args.logbookDB.password = os.Getenv("JISKEFET_MIGRATE_LOGBOOKDB_PASSWORD")
+
+	print("Opening Logbook database\n")
+	logbookDB := openDB(args.logbookDB)
+	defer logbookDB.Close()
+	print("Opening Jiskefet database\n")
+	jiskefetDB := openDB(args.jiskefetDB)
+	defer jiskefetDB.Close()
+
+	if *migrateUsers {
+		println("Migrating users...")
+		migrateLogbookUsers(args, logbookDB, jiskefetDB)
+	}
+
+	if *migrateComments {
+		println("Migrating comments...")
+		migrateLogbookComments(args, logbookDB)
+	}
+
+	if *migrateRuns {
+		println("Migrating runs...")
+		migrateLogbookRuns(args, logbookDB, *runBoundLower, *runBoundUpper, *queryLimit)
+	}
 }
