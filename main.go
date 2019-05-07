@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	attachmentsclient "github.com/SoftwareForScience/jiskefet-api-go/client/attachments"
 	logsclient "github.com/SoftwareForScience/jiskefet-api-go/client/logs"
 	"github.com/SoftwareForScience/jiskefet-api-go/client/runs"
 	runsclient "github.com/SoftwareForScience/jiskefet-api-go/client/runs"
@@ -98,7 +97,6 @@ func migrateLogbookRuns(args Args, logbookDB *sql.DB, runBoundLower string, runB
 func migrateLogbookComments(args Args, logbookDB *sql.DB) {
 	// Initialize Jiskefet API
 	logsClient := logsclient.New(httptransport.New(args.hostURL, args.apiPath, nil), strfmt.Default)
-	attachmentsClient := attachmentsclient.New(httptransport.New(args.hostURL, args.apiPath, nil), strfmt.Default)
 	auth := httptransport.BearerToken(args.apiToken)
 
 	// Get Comment data from DB and put into sensible data structures
@@ -149,68 +147,111 @@ func migrateLogbookComments(args Args, logbookDB *sql.DB) {
 	wg.Add(len(roots))
 
 	log.Printf("Posting comments\n")
-	for i, id := range roots {
-		f := func(i int, id int64) {
+	for i, logbookRootID := range roots {
+		f := func(i int, logbookID int64) {
 			defer wg.Done()
 			// Recursion function to traverse parent -> child relations
-			var Recurse func(id int64, level int, parentLogID int64)
-			Recurse = func(id int64, level int, parentLogID int64) {
-				comment := comments[id]
+			var Recurse func(logbookID int64, level int, jiskefetParentID int64, jiskefetRootID int64)
+			Recurse = func(logbookID int64, level int, jiskefetParentID int64, jiskefetRootID int64) {
+				comment := comments[logbookID]
 
 				// POST comment log
 				log.Printf("  - Thread #%d\n", i+1)
-				runs := make([]string, 0)
-				origin := "human"
-				subtype := "comment"
-				params := logsclient.NewPostLogsParams()
-				params.CreateLogDto = new(models.CreateLogDto)
-				params.CreateLogDto.Body = &comment.Comment.String
-				params.CreateLogDto.Origin = &origin
-				params.CreateLogDto.Runs = runs
-				params.CreateLogDto.Subtype = &subtype
-				params.CreateLogDto.Title = &comment.Title.String
-				params.CreateLogDto.User = &comment.UserID.Int64
-				//params.CreateLogDto.ParentLogID = parentLogID
-				response, err := logsClient.PostLogs(params, auth)
-				check(err)
+				log.Printf("    logbook.ID=%d, jiskefet.parentID=%d, depth=%d\n", logbookID, jiskefetParentID, level)
 
-				// Get ID of POSTed log
-				resp := response.Payload.(map[string]interface{})
-				data := resp["data"].(map[string]interface{})
-				item := data["item"].(map[string]interface{})
-				logID, err := item["logId"].(json.Number).Int64()
-				check(err)
+				jiskefetID := int64(-1)
+				if level == 0 {
+					// Necessary workaround for now... roots can only be runs
+					// Post comment to root
+					// run := int64(0)
+					origin := "human"
+					subtype := "run"
+					params := logsclient.NewPostLogsParams()
+					params.CreateLogDto = new(models.CreateLogDto)
+					params.CreateLogDto.Attachments = make([]string, 0)
+					params.CreateLogDto.Body = &comment.Comment.String
+					params.CreateLogDto.Origin = &origin
+					params.CreateLogDto.Subtype = &subtype
+					params.CreateLogDto.Title = &comment.Title.String
+					params.CreateLogDto.User = &comment.UserID.Int64
+					response, err := logsClient.PostLogs(params, auth)
+					check(err)
 
-				log.Printf("    logbook.ID=%d, jiskefet.ID=%d, jiskefet.parentID=%d\n", id, logID, parentLogID)
+					// Get ID of POSTed log
+					resp := response.Payload.(map[string]interface{})
+					data := resp["data"].(map[string]interface{})
+					item := data["item"].(map[string]interface{})
+					id, err := item["logId"].(json.Number).Int64()
+					// jiskefetID := *response.Payload.LogID // Use this once response schema is fixed
+					check(err)
+					jiskefetID = id
+				} else {
+					// Post comment to root
+					// run := int64(0)
+					origin := "human"
+					subtype := "comment"
+					params := logsclient.NewPostLogsThreadsParams()
+					params.CreateCommentDto = new(models.CreateCommentDto)
+					params.CreateCommentDto.Attachments = make([]string, 0)
+					params.CreateCommentDto.Body = &comment.Comment.String
+					params.CreateCommentDto.Origin = &origin
+					params.CreateCommentDto.ParentID = &jiskefetParentID
+					params.CreateCommentDto.RootID = &jiskefetRootID
+					params.CreateCommentDto.Subtype = &subtype
+					params.CreateCommentDto.Title = &comment.Title.String
+					params.CreateCommentDto.User = &comment.UserID.Int64
+					response, err := logsClient.PostLogsThreads(params, auth)
+					check(err)
 
-				if _, exists := files[id]; exists {
+					// Get ID of POSTed log
+					resp := response.Payload.(map[string]interface{})
+					data := resp["data"].(map[string]interface{})
+					item := data["item"].(map[string]interface{})
+					id, err := item["logId"].(json.Number).Int64()
+					// jiskefetID := *response.Payload.LogID // Use this once response schema is fixed
+					check(err)
+					jiskefetID = id
+				}
+
+				log.Printf("    jiskefet.ID=%d\n", jiskefetID)
+
+				if _, exists := files[logbookID]; exists {
 					// Post attachments to log
-					log.Printf("    Uploading %d attachments\n", len(files[id]))
-					for _, file := range files[id] {
+					log.Printf("    Uploading %d attachments\n", len(files[logbookID]))
+					for _, file := range files[logbookID] {
 						log.Printf("      - File \"%s\" (%.0f kB)\n", file.FileName.String, float64(file.Size.Int64)/1024.0)
-						uploadAttachment(args, logID, file, attachmentsClient, auth)
+						uploadAttachment(args, jiskefetID, file, logsClient, auth)
 					}
 				}
 
-				//log.Printf("  %s|_ %d\n", strings.Repeat("  ", level), id)
-				childrenIDs := parentChildren[id]
-				for _, childID := range childrenIDs {
-					Recurse(childID, level+1, logID)
+				logbookChildrenIDs := parentChildren[logbookID]
+				for _, logbookChildID := range logbookChildrenIDs {
+					if level == 0 {
+						// If we're the root, our ID is the parent and root for the child
+						jiskefetParentID := jiskefetID
+						jiskefetRootID := jiskefetID
+						Recurse(logbookChildID, level+1, jiskefetParentID, jiskefetRootID)
+					} else {
+						// If we're a child, we're parent to our child, but root stays the same
+						jiskefetParentID := jiskefetID
+						Recurse(logbookChildID, level+1, jiskefetParentID, jiskefetRootID)
+					}
 				}
 			}
-			// print("  o thread\n")
-			Recurse(id, 0, -1)
+
+			// Start off recursion for this thread root
+			Recurse(logbookID, 0, -1, -1)
 		}
 		if args.parallel {
-			go f(i, id)
+			go f(i, logbookRootID)
 		} else {
-			f(i, id)
+			f(i, logbookRootID)
 		}
 	}
 	wg.Wait()
 }
 
-func uploadAttachment(args Args, logID int64, file logbook.File, client *attachmentsclient.Client, auth runtime.ClientAuthInfoWriter) {
+func uploadAttachment(args Args, logID int64, file logbook.File, client *logsclient.Client, auth runtime.ClientAuthInfoWriter) {
 	timeCreated := file.TimeCreated.String
 	timeSplit := strings.Split(timeCreated, "-")
 	year := timeSplit[0]
@@ -228,20 +269,20 @@ func uploadAttachment(args Args, logID int64, file logbook.File, client *attachm
 
 	mime := file.ContentType.String
 	fileEncoded := base64.StdEncoding.EncodeToString([]byte(fileBytes))
+	creationTimeT, err := time.Parse(time.RFC3339, "2001-01-01T11:11:11Z")
+	check(err)
+	creationTime := strfmt.DateTime(creationTimeT)
 
-	params := attachmentsclient.NewPostAttachmentsParams()
+	// log.Printf("        WARNING: Attachments disabled, work in progress..\n")
+	params := logsclient.NewPostLogsIDAttachmentsParams()
 	params.CreateAttachmentDto = new(models.CreateAttachmentDto)
-	params.CreateAttachmentDto.ContentType = &mime
+	params.CreateAttachmentDto.CreationTime = &creationTime
 	params.CreateAttachmentDto.FileData = &fileEncoded
 	params.CreateAttachmentDto.FileMime = &mime
 	params.CreateAttachmentDto.FileName = &file.FileName.String
-	params.CreateAttachmentDto.FileSize = &file.Size.Int64
-	params.CreateAttachmentDto.LogID = &logID
-	params.CreateAttachmentDto.Title = &file.Title.String
-
-	log.Printf("        NOTE: PostAttachment disabled due to server bug\n")
-	return
-	_, err = client.PostAttachments(params, auth)
+	params.CreateAttachmentDto.Title = file.Title.String
+	params.ID = logID
+	_, err = client.PostLogsIDAttachments(params, auth)
 	check(err)
 }
 
