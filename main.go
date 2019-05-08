@@ -453,7 +453,10 @@ func migrateLogbookUsers(args Args, logbookDB *sql.DB, jiskefetDB *sql.DB) {
 }
 
 func openDB(args DBArgs) *sql.DB {
-	db, err := sql.Open("mysql", args.userName+":"+args.password+"@tcp("+args.hostPort+")/"+args.dbName)
+	connectionString := args.userName + ":" + args.password + "@tcp(" + args.hostPort + ")/" + args.dbName
+	connectionStringNoPass := args.userName + ":" + "****" + "@tcp(" + args.hostPort + ")/" + args.dbName
+	log.Printf("Opening DB @ \"%s\"\n", connectionStringNoPass)
+	db, err := sql.Open("mysql", connectionString)
 	if err != nil {
 		db.Close()
 		panic(err.Error())
