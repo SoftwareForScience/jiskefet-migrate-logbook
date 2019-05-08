@@ -467,12 +467,24 @@ func openDB(args DBArgs) *sql.DB {
 	return db
 }
 
+func checkJiskefetConnection(args Args) {
+	logsClient := logsclient.New(httptransport.New(args.hostURL, args.apiPath, nil), strfmt.Default)
+	auth := httptransport.BearerToken(args.apiToken)
+
+	log.Printf("  Getting logs\n")
+	params := logsclient.NewGetLogsParams()
+	response, err := logsClient.GetLogs(params, auth)
+	log.Printf("  %+v\n", response)
+	check(err)
+}
+
 func main() {
 	queryLimit := flag.String("rlimit", "10", "Runs: Query result size limit")
 	runBoundLower := flag.String("rmin", "500", "Runs: Lower run number bound")
 	runBoundUpper := flag.String("rmax", "9999999", "Runs: Upper run number bound")
 	parallel := flag.Bool("parallel", false, "Use parallel requests")
 
+	checkOnly := flag.Bool("check", false, "Run a connectivity check and exit")
 	migrateSubsystems := flag.Bool("msubsystems", false, "Migrate subsystems as subsystems & subsystem tags")
 	migrateUsers := flag.Bool("musers", false, "Migrate users")
 	migrateComments := flag.Bool("mcomments", false, "Migrate comments w. attachments & subsystem tags")
@@ -496,12 +508,18 @@ func main() {
 	args.logbookDB.userName = os.Getenv("JISKEFET_MIGRATE_LOGBOOKDB_USERNAME")
 	args.logbookDB.password = os.Getenv("JISKEFET_MIGRATE_LOGBOOKDB_PASSWORD")
 
-	print("Opening Logbook database\n")
+	log.Printf("Opening Logbook database\n")
 	logbookDB := openDB(args.logbookDB)
 	defer logbookDB.Close()
-	print("Opening Jiskefet database\n")
+	log.Printf("Opening Jiskefet database\n")
 	jiskefetDB := openDB(args.jiskefetDB)
 	defer jiskefetDB.Close()
+
+	if *checkOnly {
+		log.Printf("Checking Jiskefet connection\n")
+		checkJiskefetConnection(args)
+		return
+	}
 
 	if *migrateSubsystems {
 		log.Printf("Migrating subsystems...\n")
