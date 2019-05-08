@@ -175,3 +175,13 @@ func ScanSubsystem(rows *sql.Rows) Subsystem {
 	check(err)
 	return row
 }
+
+/// ScanCommentSubsystems ...
+func ScanCommentSubsystems(rows *sql.Rows) CommentSubsystems {
+	var row CommentSubsystems
+	err := rows.Scan(
+		&row.CommentID,
+		&row.SubsystemID)
+	check(err)
+	return row
+}

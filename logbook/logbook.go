@@ -140,3 +140,8 @@ type Subsystem struct {
 	NotifyProcessLogEntries  sql.NullString // text
 	Obsolete                 sql.NullInt64  // tinyint(1)
 }
+
+type CommentSubsystems struct {
+	CommentID   sql.NullInt64 // int(11)
+	SubsystemID sql.NullInt64 // int(11)
+}

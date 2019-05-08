@@ -16,6 +16,7 @@ import (
 	logsclient "github.com/SoftwareForScience/jiskefet-api-go/client/logs"
 	"github.com/SoftwareForScience/jiskefet-api-go/client/runs"
 	runsclient "github.com/SoftwareForScience/jiskefet-api-go/client/runs"
+	tagsclient "github.com/SoftwareForScience/jiskefet-api-go/client/tags"
 	"github.com/SoftwareForScience/jiskefet-api-go/models"
 	"github.com/SoftwareForScience/jiskefet-migrate-logbook/logbook"
 	"github.com/go-openapi/runtime"
@@ -47,6 +48,54 @@ type Args struct {
 	logbookDB       DBArgs
 	jiskefetDB      DBArgs
 	parallel        bool
+}
+
+func getLogbookSubsystems(logbookDB *sql.DB) []logbook.Subsystem {
+	subsystems := make([]logbook.Subsystem, 0)
+	{
+		rows, err := logbookDB.Query("select * from logbook_subsystems")
+		check(err)
+		defer rows.Close()
+
+		for rows.Next() {
+			subsystems = append(subsystems, logbook.ScanSubsystem(rows))
+		}
+		check(rows.Err())
+	}
+	return subsystems
+}
+
+func getLogbookSubsystemsMap(logbookDB *sql.DB) map[int64]logbook.Subsystem {
+	subsystems := make(map[int64]logbook.Subsystem)
+	{
+		rows, err := logbookDB.Query("select * from logbook_subsystems")
+		check(err)
+		defer rows.Close()
+
+		for rows.Next() {
+			row := logbook.ScanSubsystem(rows)
+			subsystems[row.ID.Int64] = row
+		}
+		check(rows.Err())
+	}
+	return subsystems
+}
+
+/// Returns map of CommentID -> list of SubsystemIDs
+func getCommentSubsystems(logbookDB *sql.DB) map[int64][]int64 {
+	subIDs := make(map[int64][]int64)
+	{
+		rows, err := logbookDB.Query("select commentid, subsystemid from logbook_comments_subsystems")
+		check(err)
+		defer rows.Close()
+
+		for rows.Next() {
+			row := logbook.ScanCommentSubsystems(rows)
+			subIDs[row.CommentID.Int64] = append(subIDs[row.CommentID.Int64], row.SubsystemID.Int64)
+		}
+		check(rows.Err())
+	}
+	return subIDs
 }
 
 func migrateLogbookRuns(args Args, logbookDB *sql.DB, runBoundLower string, runBoundUpper string, queryLimit string) {
@@ -97,6 +146,7 @@ func migrateLogbookRuns(args Args, logbookDB *sql.DB, runBoundLower string, runB
 func migrateLogbookComments(args Args, logbookDB *sql.DB) {
 	// Initialize Jiskefet API
 	logsClient := logsclient.New(httptransport.New(args.hostURL, args.apiPath, nil), strfmt.Default)
+	tagsClient := tagsclient.New(httptransport.New(args.hostURL, args.apiPath, nil), strfmt.Default)
 	auth := httptransport.BearerToken(args.apiToken)
 
 	// Get Comment data from DB and put into sensible data structures
@@ -124,6 +174,10 @@ func migrateLogbookComments(args Args, logbookDB *sql.DB) {
 		}
 		check(rows.Err())
 	}
+
+	// Get comment subsystems, to translate into tags
+	commentSubsystems := getCommentSubsystems(logbookDB)
+
 	// log.Printf("Thread roots:\n%+v\n", roots)
 	// log.Printf("Thread parent->children:\n%+v\n", parentChildren)
 
@@ -215,6 +269,25 @@ func migrateLogbookComments(args Args, logbookDB *sql.DB) {
 
 				log.Printf("    jiskefet.ID=%d\n", jiskefetID)
 
+				// Add subsystem tags
+				if _, exists := commentSubsystems[logbookID]; exists {
+					log.Printf("    Linking tags (not yet fully implemented)\n")
+					subsystemIDs := commentSubsystems[logbookID]
+					for _, subsystemID := range subsystemIDs {
+						tagID := subsystemID // As a temporary measure, the tags IDs are the same as the logbook subsystem IDs
+						log.Printf("      - Tag %d\n", tagID)
+						params := tagsclient.NewPatchTagsIDLogsParams()
+						params.ID = tagID
+						params.LinkLogToTagDto = new(models.LinkLogToTagDto)
+						params.LinkLogToTagDto.LogID = &jiskefetID
+						// Disabled error check for now because status 200 is apparently seen as an error when it's actually fine
+						//  _, err := tagsClient.PatchTagsIDLogs(params, auth)
+						// check(err)
+						response, _ := tagsClient.PatchTagsIDLogs(params, auth)
+						log.Printf("        Error? %s", response.Error())
+					}
+				}
+
 				if _, exists := files[logbookID]; exists {
 					// Post attachments to log
 					log.Printf("    Uploading %d attachments\n", len(files[logbookID]))
@@ -274,6 +347,14 @@ func uploadAttachment(args Args, logID int64, file logbook.File, client *logscli
 	creationTime := strfmt.DateTime(creationTimeT)
 
 	// log.Printf("        WARNING: Attachments disabled, work in progress..\n")
+	if mime == "image/jpeg" {
+		log.Printf("        WARNING: Skipping jpeg image due to server bug\n")
+		return
+	}
+	if len(fileBytes) >= 8000 {
+		log.Printf("        WARNING: Skipping large file (8kB+) due to server bug\n")
+		return
+	}
 	params := logsclient.NewPostLogsIDAttachmentsParams()
 	params.CreateAttachmentDto = new(models.CreateAttachmentDto)
 	params.CreateAttachmentDto.CreationTime = &creationTime
@@ -291,34 +372,43 @@ func migrateLogbookSubsystems(args Args, logbookDB *sql.DB, jiskefetDB *sql.DB) 
 	// access.
 
 	// Get Subsystems
-	logbookSubsystems := make([]logbook.Subsystem, 0)
-	{
-		rows, err := logbookDB.Query("select * from logbook_subsystems")
-		check(err)
-		defer rows.Close()
-
-		for rows.Next() {
-			logbookSubsystems = append(logbookSubsystems, logbook.ScanSubsystem(rows))
-		}
-		check(rows.Err())
-	}
+	logbookSubsystems := getLogbookSubsystems(logbookDB)
 	// log.Printf("Logbook subsystems:\n%+v\n", logbookSubsystems)
 
 	// Insert them into Jiskefet
 	for _, subsystem := range logbookSubsystems {
-		log.Printf("  - Inserting \"%s\"\n", subsystem.Name.String)
-		stmt, err := jiskefetDB.Prepare("INSERT IGNORE INTO sub_system(subsystem_id, subsystem_name) VALUES(?,?)")
-		check(err)
-		res, err := stmt.Exec(subsystem.ID.Int64, subsystem.Name.String)
-		check(err)
-		lastID, err := res.LastInsertId()
-		check(err)
-		rowCnt, err := res.RowsAffected()
-		check(err)
-		if rowCnt == 0 {
-			log.Printf("    Not inserted, possible duplicate\n")
-		} else {
-			log.Printf("    Inserted ID %d, affected %d\n", lastID, rowCnt)
+		log.Printf("  - Inserting \"%s\":", subsystem.Name.String)
+		{
+			log.Printf("    - As subsystem\n")
+			stmt, err := jiskefetDB.Prepare("INSERT IGNORE INTO sub_system(subsystem_id, subsystem_name) VALUES(?,?)")
+			check(err)
+			res, err := stmt.Exec(subsystem.ID.Int64, subsystem.Name.String)
+			check(err)
+			lastID, err := res.LastInsertId()
+			check(err)
+			rowCnt, err := res.RowsAffected()
+			check(err)
+			if rowCnt == 0 {
+				log.Printf("      Not inserted, possible duplicate\n")
+			} else {
+				log.Printf("      Inserted ID %d, affected %d\n", lastID, rowCnt)
+			}
+		}
+		{
+			log.Printf("    - As tag\n")
+			stmt, err := jiskefetDB.Prepare("INSERT IGNORE INTO tag(tag_id, tag_text) VALUES(?,?)")
+			check(err)
+			res, err := stmt.Exec(subsystem.ID.Int64, subsystem.Name.String)
+			check(err)
+			lastID, err := res.LastInsertId()
+			check(err)
+			rowCnt, err := res.RowsAffected()
+			check(err)
+			if rowCnt == 0 {
+				log.Printf("      Not inserted, possible duplicate\n")
+			} else {
+				log.Printf("      Inserted ID %d, affected %d\n", lastID, rowCnt)
+			}
 		}
 	}
 }
@@ -381,9 +471,9 @@ func main() {
 	runBoundUpper := flag.String("rmax", "9999999", "Runs: Upper run number bound")
 	parallel := flag.Bool("parallel", false, "Use parallel requests")
 
-	migrateSubsystems := flag.Bool("msubsystems", false, "Migrate subsystems")
+	migrateSubsystems := flag.Bool("msubsystems", false, "Migrate subsystems as subsystems & subsystem tags")
 	migrateUsers := flag.Bool("musers", false, "Migrate users")
-	migrateComments := flag.Bool("mcomments", false, "Migrate comments & attachments")
+	migrateComments := flag.Bool("mcomments", false, "Migrate comments w. attachments & subsystem tags")
 	migrateRuns := flag.Bool("mruns", false, "Migrate runs")
 	flag.Parse()
 
