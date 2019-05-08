@@ -177,6 +177,7 @@ func migrateLogbookComments(args Args, logbookDB *sql.DB) {
 
 	// Get comment subsystems, to translate into tags
 	commentSubsystems := getCommentSubsystems(logbookDB)
+	subsystemsMap := getLogbookSubsystemsMap(logbookDB) // Use for tag names, logging only
 
 	// log.Printf("Thread roots:\n%+v\n", roots)
 	// log.Printf("Thread parent->children:\n%+v\n", parentChildren)
@@ -271,11 +272,12 @@ func migrateLogbookComments(args Args, logbookDB *sql.DB) {
 
 				// Add subsystem tags
 				if _, exists := commentSubsystems[logbookID]; exists {
-					log.Printf("    Linking tags (not yet fully implemented)\n")
+					log.Printf("    Linking tags\n")
 					subsystemIDs := commentSubsystems[logbookID]
 					for _, subsystemID := range subsystemIDs {
 						tagID := subsystemID // As a temporary measure, the tags IDs are the same as the logbook subsystem IDs
-						log.Printf("      - Tag %d\n", tagID)
+						tagName := subsystemsMap[subsystemID].Name.String
+						log.Printf("      - Tag \"%s\" (ID=%d)\n", tagName, tagID)
 						params := tagsclient.NewPatchTagsIDLogsParams()
 						params.ID = tagID
 						params.LinkLogToTagDto = new(models.LinkLogToTagDto)
@@ -284,7 +286,7 @@ func migrateLogbookComments(args Args, logbookDB *sql.DB) {
 						//  _, err := tagsClient.PatchTagsIDLogs(params, auth)
 						// check(err)
 						response, _ := tagsClient.PatchTagsIDLogs(params, auth)
-						log.Printf("        Error? %s", response.Error())
+						log.Printf("        Unknown response \"%s\"", response.Error())
 					}
 				}
 
