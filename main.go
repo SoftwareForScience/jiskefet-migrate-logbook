@@ -587,9 +587,9 @@ func main() {
 	tlsInsecureSkipVerify := flag.Bool("tlsskipverify", false, "Skip insecure TLS verification")
 
 	checkOnly := flag.Bool("check", false, "Run a connectivity check and exit")
-	migrateSubsystems := flag.Bool("msubsystems", true, "Migrate subsystems as subsystems & subsystem tags")
-	migrateUsers := flag.Bool("musers", true, "Migrate users")
-	migrateComments := flag.Bool("mcomments", true, "Migrate comments w. attachments & subsystem tags")
+	migrateSubsystems := flag.Bool("msubsystems", false, "Migrate subsystems as subsystems & subsystem tags")
+	migrateUsers := flag.Bool("musers", false, "Migrate users")
+	migrateComments := flag.Bool("mcomments", false, "Migrate comments w. attachments & subsystem tags")
 	migrateRuns := flag.Bool("mruns", false, "Migrate runs")
 	flag.Parse()
 
