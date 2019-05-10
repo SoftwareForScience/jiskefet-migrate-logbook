@@ -632,13 +632,13 @@ func main() {
 		migrateLogbookUsers(args, logbookDB, jiskefetDB)
 	}
 
-	if *migrateComments {
-		log.Printf("Migrating comments...\n")
-		migrateLogbookComments(args, logbookDB, jiskefetDB)
-	}
-
 	if *migrateRuns {
 		log.Printf("Migrating runs...\n")
 		migrateLogbookRuns(args, logbookDB, *runBoundLower, *runBoundUpper, *queryLimit)
+	}
+
+	if *migrateComments {
+		log.Printf("Migrating comments...\n")
+		migrateLogbookComments(args, logbookDB, jiskefetDB)
 	}
 }
