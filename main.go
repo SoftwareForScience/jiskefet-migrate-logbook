@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -20,10 +22,23 @@ import (
 	"github.com/SoftwareForScience/jiskefet-api-go/models"
 	"github.com/SoftwareForScience/jiskefet-migrate-logbook/logbook"
 	"github.com/go-openapi/runtime"
+	"github.com/go-openapi/runtime/client"
 	httptransport "github.com/go-openapi/runtime/client"
 	"github.com/go-openapi/strfmt"
 	_ "github.com/go-sql-driver/mysql"
 )
+
+type Args struct {
+	username        string
+	password        string
+	logbookFilesDir string
+	logbookDB       DBArgs
+	jiskefetDB      DBArgs
+	parallel        bool
+	idOffset        int64
+	runtime         *client.Runtime
+	bearerToken     runtime.ClientAuthInfoWriter
+}
 
 func check(err error) {
 	if err != nil {
@@ -36,19 +51,6 @@ type DBArgs struct {
 	hostPort string
 	userName string
 	password string
-}
-
-type Args struct {
-	hostURL         string
-	apiPath         string
-	apiToken        string
-	username        string
-	password        string
-	logbookFilesDir string
-	logbookDB       DBArgs
-	jiskefetDB      DBArgs
-	parallel        bool
-	idOffset        int64
 }
 
 func getLogbookSubsystems(logbookDB *sql.DB) []logbook.Subsystem {
@@ -102,8 +104,7 @@ func getCommentSubsystems(commentID int64, logbookDB *sql.DB) []int64 {
 
 func migrateLogbookRuns(args Args, logbookDB *sql.DB, runBoundLower string, runBoundUpper string, queryLimit string) {
 	// Initialize Jiskefet API
-	client := runsclient.New(httptransport.New(args.hostURL, args.apiPath, nil), strfmt.Default)
-	bearerTokenAuth := httptransport.BearerToken(args.apiToken)
+	client := runsclient.New(args.runtime, strfmt.Default)
 
 	rows, err := logbookDB.Query("select * from logbook where run>=? and run<=? limit ?", runBoundLower, runBoundUpper, queryLimit)
 	check(err)
@@ -138,7 +139,7 @@ func migrateLogbookRuns(args Args, logbookDB *sql.DB, runBoundLower string, runB
 		params.CreateRunDto.NFlps = &row.NumberOfLDCs.Int64
 		params.CreateRunDto.NEpns = &row.NumberOfGDCs.Int64
 
-		_, err = client.PostRuns(params, bearerTokenAuth)
+		_, err = client.PostRuns(params, args.bearerToken)
 		check(err)
 	}
 	err = rows.Err()
@@ -295,9 +296,10 @@ func linkTagToLog(logID int64, tagText string, client *tagsclient.Client, auth *
 
 func migrateLogbookComments(args Args, logbookDB *sql.DB, jiskefetDB *sql.DB) {
 	// Initialize Jiskefet API
-	logsClient := logsclient.New(httptransport.New(args.hostURL, args.apiPath, nil), strfmt.Default)
-	tagsClient := tagsclient.New(httptransport.New(args.hostURL, args.apiPath, nil), strfmt.Default)
-	auth := httptransport.BearerToken(args.apiToken)
+	logsClient := logsclient.New(args.runtime, strfmt.Default)
+	tagsClient := tagsclient.New(args.runtime, strfmt.Default)
+	auth := args.bearerToken
+
 	tagIDCache := make(map[string]int64) // Cache of tag text -> tag ID
 	var tagIDCacheMutex = sync.Mutex{}
 
@@ -495,22 +497,19 @@ func migrateLogbookSubsystems(args Args, logbookDB *sql.DB, jiskefetDB *sql.DB) 
 
 	// Insert them into Jiskefet
 	for _, subsystem := range logbookSubsystems {
-		log.Printf("  - Inserting \"%s\":", subsystem.Name.String)
-		{
-			log.Printf("    - As subsystem\n")
-			stmt, err := jiskefetDB.Prepare("INSERT IGNORE INTO sub_system(subsystem_id, subsystem_name) VALUES(?,?)")
-			check(err)
-			res, err := stmt.Exec(subsystem.ID.Int64, subsystem.Name.String)
-			check(err)
-			lastID, err := res.LastInsertId()
-			check(err)
-			rowCnt, err := res.RowsAffected()
-			check(err)
-			if rowCnt == 0 {
-				log.Printf("      Not inserted, possible duplicate\n")
-			} else {
-				log.Printf("      Inserted ID %d, affected %d\n", lastID, rowCnt)
-			}
+		log.Printf("Inserting \"%s\":", subsystem.Name.String)
+		stmt, err := jiskefetDB.Prepare("INSERT IGNORE INTO sub_system(subsystem_id, subsystem_name) VALUES(?,?)")
+		check(err)
+		res, err := stmt.Exec(subsystem.ID.Int64, subsystem.Name.String)
+		check(err)
+		lastID, err := res.LastInsertId()
+		check(err)
+		rowCnt, err := res.RowsAffected()
+		check(err)
+		if rowCnt == 0 {
+			log.Printf("Not inserted, possible duplicate\n")
+		} else {
+			log.Printf("Inserted ID %d, affected %d\n", lastID, rowCnt)
 		}
 	}
 }
@@ -535,7 +534,7 @@ func migrateLogbookUsers(args Args, logbookDB *sql.DB, jiskefetDB *sql.DB) {
 
 	// Insert them into Jiskefet
 	for _, user := range logbookUsers {
-		log.Printf("  - Inserting \"%d\"\n", user.ID.Int64)
+		log.Printf("Inserting \"%d\"\n", user.ID.Int64)
 		stmt, err := jiskefetDB.Prepare("INSERT IGNORE INTO user(user_id, external_id, sams_id) VALUES(?,?,?)")
 		check(err)
 		res, err := stmt.Exec(user.ID.Int64, user.ID.Int64, user.ID.Int64)
@@ -545,9 +544,9 @@ func migrateLogbookUsers(args Args, logbookDB *sql.DB, jiskefetDB *sql.DB) {
 		rowCnt, err := res.RowsAffected()
 		check(err)
 		if rowCnt == 0 {
-			log.Printf("    Not inserted, possible duplicate\n")
+			log.Printf("Not inserted, possible duplicate\n")
 		} else {
-			log.Printf("    ID %d, affected %d\n", lastID, rowCnt)
+			log.Printf("ID %d, affected %d\n", lastID, rowCnt)
 		}
 	}
 }
@@ -571,12 +570,10 @@ func openDB(args DBArgs) *sql.DB {
 }
 
 func checkJiskefetConnection(args Args) {
-	logsClient := logsclient.New(httptransport.New(args.hostURL, args.apiPath, nil), strfmt.Default)
-	auth := httptransport.BearerToken(args.apiToken)
-
+	logsClient := logsclient.New(args.runtime, strfmt.Default)
 	log.Printf("  Getting logs\n")
 	params := logsclient.NewGetLogsParams()
-	response, err := logsClient.GetLogs(params, auth)
+	response, err := logsClient.GetLogs(params, args.bearerToken)
 	log.Printf("  %+v\n", response)
 	check(err)
 }
@@ -587,6 +584,7 @@ func main() {
 	runBoundLower := flag.String("rmin", "500", "Runs: Lower run number bound")
 	runBoundUpper := flag.String("rmax", "9999999", "Runs: Upper run number bound")
 	parallel := flag.Bool("parallel", false, "Use parallel requests")
+	tlsInsecureSkipVerify := flag.Bool("tlsskipverify", false, "Skip insecure TLS verification")
 
 	checkOnly := flag.Bool("check", false, "Run a connectivity check and exit")
 	migrateSubsystems := flag.Bool("msubsystems", true, "Migrate subsystems as subsystems & subsystem tags")
@@ -598,9 +596,10 @@ func main() {
 	var args Args
 	args.parallel = *parallel
 	args.idOffset = *idOffset
-	args.hostURL = os.Getenv("JISKEFET_HOST")
-	args.apiPath = os.Getenv("JISKEFET_PATH")
-	args.apiToken = os.Getenv("JISKEFET_API_TOKEN")
+	args.runtime = httptransport.New(os.Getenv("JISKEFET_HOST"), os.Getenv("JISKEFET_PATH"), nil)
+	args.runtime.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: *tlsInsecureSkipVerify}}
+
+	args.bearerToken = httptransport.BearerToken(os.Getenv("JISKEFET_API_TOKEN"))
 	args.logbookFilesDir = os.Getenv("JISKEFET_MIGRATE_LOGBOOKDB_FILESDIR")
 
 	args.jiskefetDB.dbName = os.Getenv("JISKEFET_MIGRATE_JISKEFETDB_DBNAME")
