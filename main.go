@@ -48,6 +48,7 @@ type Args struct {
 	logbookDB       DBArgs
 	jiskefetDB      DBArgs
 	parallel        bool
+	idOffset        int64
 }
 
 func getLogbookSubsystems(logbookDB *sql.DB) []logbook.Subsystem {
@@ -81,17 +82,18 @@ func getLogbookSubsystemsMap(logbookDB *sql.DB) map[int64]logbook.Subsystem {
 	return subsystems
 }
 
-/// Returns map of CommentID -> list of SubsystemIDs
-func getCommentSubsystems(logbookDB *sql.DB) map[int64][]int64 {
-	subIDs := make(map[int64][]int64)
+/// Returns list of SubsystemIDs associated with the commentID
+func getCommentSubsystems(commentID int64, logbookDB *sql.DB) []int64 {
+	subIDs := make([]int64, 0)
 	{
-		rows, err := logbookDB.Query("select commentid, subsystemid from logbook_comments_subsystems")
+		rows, err := logbookDB.Query("select subsystemid from logbook_comments_subsystems where commentid=?", commentID)
 		check(err)
 		defer rows.Close()
-
 		for rows.Next() {
-			row := logbook.ScanCommentSubsystems(rows)
-			subIDs[row.CommentID.Int64] = append(subIDs[row.CommentID.Int64], row.SubsystemID.Int64)
+			var subsystemID sql.NullInt64
+			err := rows.Scan(&subsystemID)
+			check(err)
+			subIDs = append(subIDs, subsystemID.Int64)
 		}
 		check(rows.Err())
 	}
@@ -143,76 +145,186 @@ func migrateLogbookRuns(args Args, logbookDB *sql.DB, runBoundLower string, runB
 	check(err)
 }
 
-func migrateLogbookComments(args Args, logbookDB *sql.DB) {
+/// Gets all the comments that are roots (i.e. don't have parents)
+func getCommentRoots(logbookDB *sql.DB) []int64 {
+	roots := make([]int64, 0)
+
+	rows, err := logbookDB.Query("SELECT id FROM logbook_comments WHERE parent IS NULL")
+	check(err)
+	defer rows.Close()
+
+	for rows.Next() {
+		var id int64
+		err := rows.Scan(&id)
+		check(err)
+		roots = append(roots, id)
+	}
+	check(rows.Err())
+
+	return roots
+}
+
+/// Gets all the comments that are children of the given root (i.e. belong to that thread)
+func getThreadComments(rootID int64, logbookDB *sql.DB) []int64 {
+	children := make([]int64, 0)
+
+	rows, err := logbookDB.Query("SELECT id FROM logbook_comments WHERE root_parent = ?", rootID)
+	check(err)
+	defer rows.Close()
+
+	for rows.Next() {
+		var id int64
+		err := rows.Scan(&id)
+		check(err)
+		children = append(children, id)
+	}
+	check(rows.Err())
+
+	return children
+}
+
+/// Make a map of a thread hierarchy
+func getCommentParentChildrenMap(rootID int64, logbookDB *sql.DB) map[int64][]int64 {
+	parentChildren := make(map[int64][]int64) // parent -> list of children
+
+	rows, err := logbookDB.Query("select id,parent from logbook_comments")
+	check(err)
+	defer rows.Close()
+
+	for rows.Next() {
+		var id int64
+		var parentID sql.NullInt64
+		err := rows.Scan(&id, &parentID)
+		check(err)
+
+		if parentID.Valid {
+			parentChildren[parentID.Int64] = append(parentChildren[parentID.Int64], id)
+		}
+	}
+	check(rows.Err())
+
+	return parentChildren
+}
+
+func getComment(ID int64, logbookDB *sql.DB) logbook.Comment {
+	rows, err := logbookDB.Query("select * from logbook_comments where id = ?", ID)
+	check(err)
+	defer rows.Close()
+
+	var comment logbook.Comment
+	for rows.Next() {
+		comment = logbook.ScanComment(rows)
+	}
+
+	check(rows.Err())
+	return comment
+}
+
+func getCommentFiles(ID int64, logbookDB *sql.DB) []logbook.File {
+	files := make([]logbook.File, 0) // list of files
+	rows, err := logbookDB.Query("SELECT * FROM logbook_files WHERE commentid = ?", ID)
+	check(err)
+	defer rows.Close()
+
+	for rows.Next() {
+		file := logbook.ScanFile(rows)
+		files = append(files, file)
+	}
+	check(rows.Err())
+	return files
+}
+
+func updateJiskefetLogCreationTime(ID int64, logbookTimeCreated string, jiskefetDB *sql.DB) {
+	stmt, err := jiskefetDB.Prepare("UPDATE log SET creation_time=? WHERE log_id=?")
+	check(err)
+	_, err = stmt.Exec(logbookTimeCreated, ID)
+	check(err)
+}
+
+func linkTagToLog(logID int64, tagText string, client *tagsclient.Client, auth *runtime.ClientAuthInfoWriter,
+	tagIDCache *map[string]int64, tagIDCacheMutex *sync.Mutex) {
+
+	var tagID int64
+	func() {
+		defer (*tagIDCacheMutex).Unlock()
+		(*tagIDCacheMutex).Lock()
+		if _, exists := (*tagIDCache)[tagText]; !exists {
+			// Tag doesn't exist in cache
+			// Check if tag exists in Jiskefet
+			params := tagsclient.NewGetTagsParams()
+			params.TagText = &tagText
+			response, err := client.GetTags(params, *auth)
+			check(err)
+			resp := response.Payload.(map[string]interface{})
+			data := resp["data"].(map[string]interface{})
+			items := data["items"].([]interface{})
+			if len(items) > 0 {
+				// Tag exists, add ID to cache
+				item := items[0].(map[string]interface{})
+				tagID, err = item["tagId"].(json.Number).Int64()
+				check(err)
+			} else {
+				// If not, add tag to Jiskefet and ID to cache
+				params := tagsclient.NewPostTagsParams()
+				params.CreateTagDto = new(models.CreateTagDto)
+				params.CreateTagDto.TagText = &tagText
+				response, err := client.PostTags(params, *auth)
+				resp := response.Payload.(map[string]interface{})
+				data := resp["data"].(map[string]interface{})
+				item := data["item"].(map[string]interface{})
+				tagID, err = item["tagId"].(json.Number).Int64()
+				check(err)
+				log.Printf("Tag %s did not exist, added to Jiskefet with ID=%d", tagText, tagID)
+			}
+			(*tagIDCache)[tagText] = tagID
+		} else {
+			tagID = (*tagIDCache)[tagText]
+		}
+	}()
+
+	// Add it to the log
+	params := tagsclient.NewPatchTagsIDLogsParams()
+	params.ID = tagID
+	params.LinkLogToTagDto = new(models.LinkLogToTagDto)
+	params.LinkLogToTagDto.LogID = &logID
+	// Disabled error check for now because status 200 is apparently seen as an error when it's actually fine
+	//  _, err := tagsClient.PatchTagsIDLogs(params, auth)
+	// check(err)
+	client.PatchTagsIDLogs(params, *auth)
+}
+
+func migrateLogbookComments(args Args, logbookDB *sql.DB, jiskefetDB *sql.DB) {
 	// Initialize Jiskefet API
 	logsClient := logsclient.New(httptransport.New(args.hostURL, args.apiPath, nil), strfmt.Default)
 	tagsClient := tagsclient.New(httptransport.New(args.hostURL, args.apiPath, nil), strfmt.Default)
 	auth := httptransport.BearerToken(args.apiToken)
+	tagIDCache := make(map[string]int64) // Cache of tag text -> tag ID
+	var tagIDCacheMutex = sync.Mutex{}
 
-	// Get Comment data from DB and put into sensible data structures
+	// Get Comment data from DB
 	log.Printf("Importing logbook_comments\n")
-	comments := make(map[int64]logbook.Comment) // Map for rows
-	roots := make([]int64, 0)                   // IDs of thread roots
-	parentChildren := make(map[int64][]int64)   // parent -> list of children
-	{
-		rows, err := logbookDB.Query("select * from logbook_comments")
-		check(err)
-		defer rows.Close()
+	roots := getCommentRoots(logbookDB) // IDs of thread roots
 
-		for rows.Next() {
-			row := logbook.ScanComment(rows)
-
-			id := row.ID.Int64
-			comments[id] = row
-			if !row.Parent.Valid && !row.RootParent.Valid {
-				// We have a thread root
-				roots = append(roots, id)
-			}
-			if row.Parent.Valid {
-				parentChildren[row.Parent.Int64] = append(parentChildren[row.Parent.Int64], id)
-			}
-		}
-		check(rows.Err())
-	}
-
-	// Get comment subsystems, to translate into tags
-	commentSubsystems := getCommentSubsystems(logbookDB)
+	// Get subsystems, to translate into tags
 	subsystemsMap := getLogbookSubsystemsMap(logbookDB) // Use for tag names, logging only
-
-	// log.Printf("Thread roots:\n%+v\n", roots)
-	// log.Printf("Thread parent->children:\n%+v\n", parentChildren)
-
-	// Get Files from DB (note: doesn't contain the actual file, it's just metadata)
-	log.Printf("Importing logbook_files\n")
-	files := make(map[int64][]logbook.File) // comment_id -> list of files
-	{
-		rows, err := logbookDB.Query("select * from logbook_files")
-		check(err)
-		defer rows.Close()
-
-		for rows.Next() {
-			file := logbook.ScanFile(rows)
-			files[file.CommentID.Int64] = append(files[file.CommentID.Int64], file)
-		}
-		check(rows.Err())
-	}
-	// log.Printf("Files:\n%+v\n", files)
 
 	var wg sync.WaitGroup
 	wg.Add(len(roots))
 
 	log.Printf("Posting comments\n")
 	for i, logbookRootID := range roots {
+		parentChildren := getCommentParentChildrenMap(logbookRootID, logbookDB) // Get hierarchy map of this thread
+
 		f := func(i int, logbookID int64) {
 			defer wg.Done()
 			// Recursion function to traverse parent -> child relations
 			var Recurse func(logbookID int64, level int, jiskefetParentID int64, jiskefetRootID int64)
 			Recurse = func(logbookID int64, level int, jiskefetParentID int64, jiskefetRootID int64) {
-				comment := comments[logbookID]
+				comment := getComment(logbookID, logbookDB)
 
 				// POST comment log
-				log.Printf("  - Thread #%d\n", i+1)
-				log.Printf("    logbook.ID=%d, jiskefet.parentID=%d, depth=%d\n", logbookID, jiskefetParentID, level)
+				log.Printf("Thread #%d\n", i+1)
+				log.Printf("Logbook.ID=%d, Jiskefet.parentID=%d, Depth=%d ", logbookID, jiskefetParentID, level)
 
 				jiskefetID := int64(-1)
 				if level == 0 {
@@ -268,33 +380,37 @@ func migrateLogbookComments(args Args, logbookDB *sql.DB) {
 					jiskefetID = id
 				}
 
-				log.Printf("    jiskefet.ID=%d\n", jiskefetID)
+				log.Printf("Jiskefet.ID=%d\n", jiskefetID)
 
-				// Add subsystem tags
-				if _, exists := commentSubsystems[logbookID]; exists {
-					log.Printf("    Linking tags\n")
-					subsystemIDs := commentSubsystems[logbookID]
+				log.Printf("Updating creation time\n")
+				updateJiskefetLogCreationTime(jiskefetID, comment.TimeCreated.String, jiskefetDB)
+
+				log.Printf("Linking comment type tag\n")
+				{
+					// Add type tags to replace enum('GENERAL','HARDWARE','CAVERN','DQM/QA','SOFTWARE','NETWORK','EOS','DCS','OTHER')
+					tagText := "COMMENT_TYPE/" + comment.CommentType.String
+					log.Printf("Tag \"%s\"\n", tagText)
+					linkTagToLog(jiskefetID, tagText, tagsClient, &auth, &tagIDCache, &tagIDCacheMutex)
+				}
+
+				log.Printf("Linking subsystem tag(s)\n")
+				{
+					subsystemIDs := getCommentSubsystems(logbookID, logbookDB)
 					for _, subsystemID := range subsystemIDs {
-						tagID := subsystemID // As a temporary measure, the tags IDs are the same as the logbook subsystem IDs
-						tagName := subsystemsMap[subsystemID].Name.String
-						log.Printf("      - Tag \"%s\" (ID=%d)\n", tagName, tagID)
-						params := tagsclient.NewPatchTagsIDLogsParams()
-						params.ID = tagID
-						params.LinkLogToTagDto = new(models.LinkLogToTagDto)
-						params.LinkLogToTagDto.LogID = &jiskefetID
-						// Disabled error check for now because status 200 is apparently seen as an error when it's actually fine
-						//  _, err := tagsClient.PatchTagsIDLogs(params, auth)
-						// check(err)
-						response, _ := tagsClient.PatchTagsIDLogs(params, auth)
-						log.Printf("        Unknown response \"%s\"", response.Error())
+						tagText := subsystemsMap[subsystemID].Name.String
+						log.Printf("Tag \"%s\"\n", tagText)
+						linkTagToLog(jiskefetID, tagText, tagsClient, &auth, &tagIDCache, &tagIDCacheMutex)
 					}
 				}
 
-				if _, exists := files[logbookID]; exists {
+				// Get Files from DB (note: doesn't contain the actual file, it's just metadata)
+				// log.Printf("Importing logbook_files\n")
+				files := getCommentFiles(logbookID, logbookDB)
+				if len(files) > 0 {
 					// Post attachments to log
-					log.Printf("    Uploading %d attachments\n", len(files[logbookID]))
-					for _, file := range files[logbookID] {
-						log.Printf("      - File \"%s\" (%.0f kB)\n", file.FileName.String, float64(file.Size.Int64)/1024.0)
+					log.Printf("Uploading %d attachments\n", len(files))
+					for _, file := range files {
+						log.Printf("File \"%s\" (%.0f kB)\n", file.FileName.String, float64(file.Size.Int64)/1024.0)
 						uploadAttachment(args, jiskefetID, file, logsClient, auth)
 					}
 				}
@@ -338,7 +454,7 @@ func uploadAttachment(args Args, logID int64, file logbook.File, client *logscli
 	path := fmt.Sprintf("%s/%s-%s/%d_%d.%s",
 		args.logbookFilesDir, year, month, file.CommentID.Int64, file.FileID.Int64, extension)
 
-	log.Printf("        Reading from \"%s\"", path)
+	log.Printf("Reading from \"%s\"", path)
 	fileBytes, err := ioutil.ReadFile(path)
 	check(err)
 
@@ -350,11 +466,11 @@ func uploadAttachment(args Args, logID int64, file logbook.File, client *logscli
 
 	// log.Printf("        WARNING: Attachments disabled, work in progress..\n")
 	if mime == "image/jpeg" {
-		log.Printf("        WARNING: Skipping jpeg image due to server bug\n")
+		log.Printf("WARNING: Skipping jpeg image due to server bug\n")
 		return
 	}
 	if len(fileBytes) >= 8000 {
-		log.Printf("        WARNING: Skipping large file (8kB+) due to server bug\n")
+		log.Printf("WARNING: Skipping large file (8kB+) due to server bug\n")
 		return
 	}
 	params := logsclient.NewPostLogsIDAttachmentsParams()
@@ -396,22 +512,6 @@ func migrateLogbookSubsystems(args Args, logbookDB *sql.DB, jiskefetDB *sql.DB) 
 				log.Printf("      Inserted ID %d, affected %d\n", lastID, rowCnt)
 			}
 		}
-		{
-			log.Printf("    - As tag\n")
-			stmt, err := jiskefetDB.Prepare("INSERT IGNORE INTO tag(tag_id, tag_text) VALUES(?,?)")
-			check(err)
-			res, err := stmt.Exec(subsystem.ID.Int64, subsystem.Name.String)
-			check(err)
-			lastID, err := res.LastInsertId()
-			check(err)
-			rowCnt, err := res.RowsAffected()
-			check(err)
-			if rowCnt == 0 {
-				log.Printf("      Not inserted, possible duplicate\n")
-			} else {
-				log.Printf("      Inserted ID %d, affected %d\n", lastID, rowCnt)
-			}
-		}
 	}
 }
 
@@ -421,7 +521,7 @@ func migrateLogbookUsers(args Args, logbookDB *sql.DB, jiskefetDB *sql.DB) {
 
 	// Get Logbook users
 	logbookUsers := make([]logbook.User, 0)
-	{
+	func() {
 		rows, err := logbookDB.Query("select * from logbook_users")
 		check(err)
 		defer rows.Close()
@@ -430,7 +530,7 @@ func migrateLogbookUsers(args Args, logbookDB *sql.DB, jiskefetDB *sql.DB) {
 			logbookUsers = append(logbookUsers, logbook.ScanUser(rows))
 		}
 		check(rows.Err())
-	}
+	}()
 	//log.Printf("Logbook users:\n%+v\n", logbookUsers)
 
 	// Insert them into Jiskefet
@@ -482,20 +582,22 @@ func checkJiskefetConnection(args Args) {
 }
 
 func main() {
+	idOffset := flag.Int64("idoffset", 1000000000, "IDs of logbook origin will get this offset in the jiskefet DB")
 	queryLimit := flag.String("rlimit", "10", "Runs: Query result size limit")
 	runBoundLower := flag.String("rmin", "500", "Runs: Lower run number bound")
 	runBoundUpper := flag.String("rmax", "9999999", "Runs: Upper run number bound")
 	parallel := flag.Bool("parallel", false, "Use parallel requests")
 
 	checkOnly := flag.Bool("check", false, "Run a connectivity check and exit")
-	migrateSubsystems := flag.Bool("msubsystems", false, "Migrate subsystems as subsystems & subsystem tags")
-	migrateUsers := flag.Bool("musers", false, "Migrate users")
-	migrateComments := flag.Bool("mcomments", false, "Migrate comments w. attachments & subsystem tags")
+	migrateSubsystems := flag.Bool("msubsystems", true, "Migrate subsystems as subsystems & subsystem tags")
+	migrateUsers := flag.Bool("musers", true, "Migrate users")
+	migrateComments := flag.Bool("mcomments", true, "Migrate comments w. attachments & subsystem tags")
 	migrateRuns := flag.Bool("mruns", false, "Migrate runs")
 	flag.Parse()
 
 	var args Args
 	args.parallel = *parallel
+	args.idOffset = *idOffset
 	args.hostURL = os.Getenv("JISKEFET_HOST")
 	args.apiPath = os.Getenv("JISKEFET_PATH")
 	args.apiToken = os.Getenv("JISKEFET_API_TOKEN")
@@ -536,7 +638,7 @@ func main() {
 
 	if *migrateComments {
 		log.Printf("Migrating comments...\n")
-		migrateLogbookComments(args, logbookDB)
+		migrateLogbookComments(args, logbookDB, jiskefetDB)
 	}
 
 	if *migrateRuns {
