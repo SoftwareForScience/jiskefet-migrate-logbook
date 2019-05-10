@@ -35,7 +35,6 @@ type Args struct {
 	logbookDB       DBArgs
 	jiskefetDB      DBArgs
 	parallel        bool
-	idOffset        int64
 	runtime         *client.Runtime
 	bearerToken     runtime.ClientAuthInfoWriter
 }
@@ -579,7 +578,6 @@ func checkJiskefetConnection(args Args) {
 }
 
 func main() {
-	idOffset := flag.Int64("idoffset", 1000000000, "IDs of logbook origin will get this offset in the jiskefet DB")
 	queryLimit := flag.String("rlimit", "10", "Runs: Query result size limit")
 	runBoundLower := flag.String("rmin", "500", "Runs: Lower run number bound")
 	runBoundUpper := flag.String("rmax", "9999999", "Runs: Upper run number bound")
@@ -595,7 +593,6 @@ func main() {
 
 	var args Args
 	args.parallel = *parallel
-	args.idOffset = *idOffset
 	args.runtime = httptransport.New(os.Getenv("JISKEFET_HOST"), os.Getenv("JISKEFET_PATH"), nil)
 	args.runtime.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: *tlsInsecureSkipVerify}}
 
